@@ -3,17 +3,24 @@ from django.contrib.auth import authenticate
 from .models import CustomUser, OTP
 from django.utils import timezone
 from datetime import timedelta
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 
 # Function to validate registration data
 def validate_registration_data(data):
     if data['password'] != data['confirmpassword']:
         raise serializers.ValidationError("Password and Confirm Password do not match.")
+    
+    try:
+        validate_password(data['password'])
+    except ValidationError as e:
+        raise serializers.ValidationError(e.messages)
+    
     return data
-
 # Function to create a user
 def create_user(data):
     validated_data = data.copy()
-    validated_data.pop('confirmpassword')  # Remove confirmpassword before creating the user
+    validated_data.pop('confirmpassword')  # confirm password hatau
     user = CustomUser.objects.create_user(**validated_data)
     return user
 
@@ -44,7 +51,7 @@ def validate_otp_data(data):
     except OTP.DoesNotExist:
         raise serializers.ValidationError("OTP not found or expired.")
 
-    if timezone.now() - otp_record.created_at > timedelta(minutes=5):
+    if otp_record.is_expired():
         raise serializers.ValidationError("OTP expired.")
 
     if otp_record.otp != otp:

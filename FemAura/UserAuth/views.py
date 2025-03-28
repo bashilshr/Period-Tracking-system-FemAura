@@ -1,10 +1,12 @@
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view,permission_classes
+from django.views.decorators.csrf import csrf_exempt
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework.response import Response
+from .models import CustomUser, OTP, Cycle
+from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
 from drf_yasg import openapi
 from django.core.mail import send_mail
-from .models import CustomUser, OTP
 from django.conf import settings
 import random
 from rest_framework import serializers
@@ -12,8 +14,12 @@ from .serializers import(validate_registration_data,
                          create_user,
                          validate_otp_data,
                          validate_login_data)
+from .utils import (get_average_cycle_length,get_current_day,
+                    get_ovulation_status,get_period_history,
+                    get_phase)
+from django.contrib.auth import authenticate, login, logout
 
-from django.contrib.auth import authenticate, login
+from datetime import datetime
 
 @swagger_auto_schema(
     method='post',
@@ -21,6 +27,7 @@ from django.contrib.auth import authenticate, login
     request_body=openapi.Schema(
         type=openapi.TYPE_OBJECT,
         properties={
+            'username': openapi.Schema(type=openapi.TYPE_STRING, description='User name'),
             'email': openapi.Schema(type=openapi.TYPE_STRING, description='User email'),
             'password': openapi.Schema(type=openapi.TYPE_STRING, description='User password'),
             'confirmpassword': openapi.Schema(type=openapi.TYPE_STRING, description='Confirm password'),
@@ -64,6 +71,7 @@ def register_user(request):
         )
 
         return Response({'message': 'OTP sent to your email. Please verify to complete registration.'}, status=status.HTTP_201_CREATED)
+
 @swagger_auto_schema(
     method='post',
     operation_description="Verify the OTP sent to the user's email to activate the account.",
@@ -80,6 +88,7 @@ def register_user(request):
         400: 'Invalid OTP or OTP expired.',
     }
 )
+
 @api_view(['POST'])
 def verify_otp(request):
     if request.method == 'POST':
@@ -116,6 +125,7 @@ def verify_otp(request):
         400: 'Invalid email or password.',
     }
 )
+
 @api_view(['POST'])
 def login_user(request):
     if request.method == 'POST':
@@ -129,3 +139,176 @@ def login_user(request):
         user = validated_data['user']
         login(request, user)
         return Response({'message': 'Login successful'}, status=status.HTTP_200_OK)
+    
+@swagger_auto_schema(
+    method='post',
+    operation_description="Log out the authenticated user.",
+    responses={
+        200: 'Logout successful.',
+        401: 'User is not authenticated.',
+        500: 'Internal server error.',
+    }
+)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def logout_user(request):
+    """
+    Log out the authenticated user.
+    """
+    try:
+        logout(request)
+        return Response({'message': 'Logout successful'}, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+#==========================prediction of cycle=======================
+#swagger for period tracking from users input
+@swagger_auto_schema(
+    method='post',
+    operation_description="Log a new menstrual cycle for the authenticated user.",
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        properties={
+            'start_date': openapi.Schema(type=openapi.TYPE_STRING, format='date', description='Start date of the period'),
+            'end_date': openapi.Schema(type=openapi.TYPE_STRING, format='date', description='End date of the period'),
+        },
+        required=['start_date', 'end_date'],
+    ),
+    responses={
+        201: openapi.Response('Cycle logged successfully'),
+        400: openapi.Response('Invalid input data'),
+    }
+)
+@csrf_exempt
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def log_cycle(request):
+    """
+    Log a new menstrual cycle for the authenticated user.
+    """
+    try:
+        user = request.user
+        start_date_str = request.data.get('start_date')
+        end_date_str = request.data.get('end_date')
+
+        # Validate input data
+        if not start_date_str or not end_date_str:
+            return Response({'error': 'Both start_date and end_date are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # Parse the input strings into date objects
+            start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+            end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+        except ValueError:
+            return Response({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Ensure end_date is after start_date
+        if end_date <= start_date:
+            return Response({'error': 'end_date must be after start_date'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Create and save the Cycle instance
+        cycle = Cycle(user=user, start_date=start_date, end_date=end_date)
+        cycle.save()
+
+        return Response({'message': 'Cycle logged successfully'}, status=status.HTTP_201_CREATED)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+#swagger for prediction of cycle
+@swagger_auto_schema(
+    method='get',
+    operation_description="Predict cycle-related information for the authenticated user.",
+    responses={
+        200: openapi.Response(
+            description="Cycle information predicted successfully",
+            schema=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'avg_cycle_length': openapi.Schema(type=openapi.TYPE_INTEGER, description='Average cycle length'),
+                    'current_day': openapi.Schema(type=openapi.TYPE_INTEGER, description='Current day of the cycle'),
+                    'ovulation_status': openapi.Schema(type=openapi.TYPE_STRING, description='Ovulation status'),
+                    'phase': openapi.Schema(
+                        type=openapi.TYPE_OBJECT,
+                        properties={
+                            'title': openapi.Schema(type=openapi.TYPE_STRING, description='Phase title'),
+                            'symptoms': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING), description='Common symptoms'),
+                        },
+                    ),
+                },
+            ),
+        ),
+        400: openapi.Response('Invalid input data'),
+    }
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def predict_cycle(request):
+    """
+    Predict cycle-related information for the authenticated user.
+    """
+    try:
+        user = request.user
+        avg_cycle_length = get_average_cycle_length(user)
+        current_day = get_current_day(user)
+        ovulation_status = get_ovulation_status(user)
+        phase = get_phase(user)
+
+        return Response({
+            'avg_cycle_length': avg_cycle_length,
+            'current_day': current_day,
+            'ovulation_status': ovulation_status,
+            'phase': phase,
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@swagger_auto_schema(
+    method='get',
+    operation_description="Fetch period history for the authenticated user.",
+    responses={
+        200: openapi.Response(
+            description="Period history retrieved successfully",
+            schema=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'avg_cycle_length': openapi.Schema(type=openapi.TYPE_NUMBER, description='Average cycle length'),
+                    'total_cycles': openapi.Schema(type=openapi.TYPE_INTEGER, description='Total number of cycles'),
+                    'period_history': openapi.Schema(
+                        type=openapi.TYPE_ARRAY,
+                        items=openapi.Items(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'start_date': openapi.Schema(type=openapi.TYPE_STRING, format='date', description='Start date of the period'),
+                                'end_date': openapi.Schema(type=openapi.TYPE_STRING, format='date', description='End date of the period'),
+                                'cycle_length': openapi.Schema(type=openapi.TYPE_INTEGER, description='Length of the cycle'),
+                            },
+                        ),
+                    ),
+                },
+            ),
+        ),
+        404: openapi.Response('No cycle data found'),
+        400: openapi.Response('Invalid input data'),
+    }
+)
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def period_history(request):
+    """
+    Fetch period history for the authenticated user.
+
+    Returns:
+    - avg_cycle_length: Average length of the user's menstrual cycles.
+    - total_cycles: Total number of cycles recorded.
+    - period_history: List of cycles with start date, end date, and cycle length.
+    """
+    try:
+        user = request.user
+        history = get_period_history(user)
+
+        if not history:
+            return Response({'error': 'No cycle data found'}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(history, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
