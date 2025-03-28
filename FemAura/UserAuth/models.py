@@ -1,7 +1,8 @@
 from django.contrib.auth.models import AbstractUser,BaseUserManager
-from django.db import models
 from django.utils import timezone
 from datetime import timedelta
+from django.db import models
+from django.conf import settings
 
 class CustomUserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
@@ -41,6 +42,7 @@ class CustomUser(AbstractUser):
     
 
 class OTP(models.Model):
+    username = models.CharField(max_length=255)
     email = models.EmailField()
     otp = models.CharField(max_length=4)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -50,3 +52,26 @@ class OTP(models.Model):
 
     def is_expired(self):
         return timezone.now() - self.created_at > timedelta(minutes=5)
+#============= For Cycle prediction =============
+
+
+class Cycle(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)  # Link to the user
+    start_date = models.DateField()  # Start date of the period
+    end_date = models.DateField()  # End date of the period
+    cycle_length = models.IntegerField(blank=True, null=True)  # Calculated cycle length
+
+    def save(self, *args, **kwargs):
+        # Calculate cycle length automatically
+        if self.start_date and self.end_date:
+            self.cycle_length = (self.end_date - self.start_date).days
+        super().save(*args, **kwargs)
+
+class Symptom(models.Model):
+    cycle = models.ForeignKey(Cycle, on_delete=models.CASCADE)  # Link to the cycle
+    symptom = models.CharField(max_length=100)  # Symptom name (e.g., cramps)
+    intensity = models.IntegerField()  # Intensity of the symptom (1-10)
+
+class Mood(models.Model):
+    cycle = models.ForeignKey(Cycle, on_delete=models.CASCADE)  # Link to the cycle
+    mood = models.CharField(max_length=100)  # Mood (e.g., happy, stressed)
