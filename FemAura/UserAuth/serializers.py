@@ -1,8 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import authenticate
 from .models import CustomUser, OTP
-from django.utils import timezone
-from datetime import timedelta
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 
@@ -20,7 +18,14 @@ def validate_registration_data(data):
 # Function to create a user
 def create_user(data):
     validated_data = data.copy()
-    validated_data.pop('confirmpassword')  # confirm password hatau
+    validated_data.pop('confirmpassword', None)
+    
+    email = validated_data.get('email', '').lower().strip()
+    validated_data['email'] = email
+    
+    if CustomUser.objects.filter(email__iexact=email).exists():
+        raise serializers.ValidationError("An account with this email already exists.")
+    
     user = CustomUser.objects.create_user(**validated_data)
     return user
 

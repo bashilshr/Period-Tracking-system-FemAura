@@ -44,14 +44,15 @@ class CustomUser(AbstractUser):
 class OTP(models.Model):
     username = models.CharField(max_length=255)
     email = models.EmailField()
-    otp = models.CharField(max_length=4)
+    otp = models.CharField(max_length=6)  # Changed to 6 digits
     created_at = models.DateTimeField(auto_now_add=True)
-
+    attempts = models.PositiveIntegerField(default=1)  # Add this field
+    
     def __str__(self):
         return f"{self.email} - {self.otp}"
 
     def is_expired(self):
-        return timezone.now() - self.created_at > timedelta(minutes=5)
+        return timezone.now() - self.created_at > timedelta(minutes=10)  # Changed to 10 minutes
 #============= For Cycle prediction =============
 
 

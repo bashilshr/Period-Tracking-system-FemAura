@@ -37,113 +37,305 @@ def get_current_day(user):
 
 def get_ovulation_status(user):
     """
-    Determine the ovulation status.
+    Improved ovulation prediction for irregular cycles
     """
-    cycles = Cycle.objects.filter(user=user)
+    cycles = Cycle.objects.filter(user=user).order_by('-start_date')
     if not cycles.exists():
-        return "No data"
-
-    current_day = get_current_day(user)
-    avg_cycle_length = get_average_cycle_length(user)
-    ovulation_day = avg_cycle_length - 14
-
-    if current_day < ovulation_day:
-        return f"Ovulation in {ovulation_day - current_day} days"
-    elif current_day == ovulation_day:
-        return "Ovulation today"
-    elif current_day <= ovulation_day + 2:
-        return "Ovulation possible"
-    else:
-        return "Ovulation finished"
+        return "No data available"
+    
+    # Get the 3 most recent cycles for pattern detection
+    recent_cycles = list(cycles[:3])
+    
+    # If only one cycle exists
+    if len(recent_cycles) == 1:
+        return "Not enough data for prediction (need at least 2 cycles)"
+    
+    # Calculate variability
+    lengths = [c.cycle_length for c in recent_cycles if c.cycle_length]
+    avg_length = sum(lengths) / len(lengths)
+    variability = max(lengths) - min(lengths)
+    
+    # Highly irregular classification
+    if variability > 15 or any(l > 45 for l in lengths):
+        return "Highly irregular cycle detected - predictions may be inaccurate"
 
 def get_phase(user):
     """
-    Determine the current phase of the cycle and provide symptoms and recommendations.
+    Determine the current menstrual phase with adaptive logic for irregular cycles.
+    Returns phase information including title, symptoms, and recommendations.
     """
-    cycles = Cycle.objects.filter(user=user)
+    cycles = Cycle.objects.filter(user=user).order_by('-start_date')
     if not cycles.exists():
-        return {'title': 'No data', 'symptoms': [], 'recommendations': []}
+        return {
+            'title': 'No data',
+            'symptoms': [],
+            'recommendations': [],
+            'is_irregular': False,
+            'confidence': 'none'
+        }
 
+    current_cycle = cycles.first()
     current_day = get_current_day(user)
     avg_cycle_length = get_average_cycle_length(user)
-
-    # Check if the cycle is irregular
-    is_irregular = avg_cycle_length > 28
-
-    if current_day <= 7:
-        phase_title = 'Menstrual Phase'
-        symptoms = ['Cramps', 'Fatigue', 'Mood swings']
-        recommendations = [
-            'Stay hydrated',
-            'Use a heating pad for cramps',
-            'Rest if you feel fatigued',
-        ]
-    elif current_day <= 14:
-        phase_title = 'Follicular Phase'
-        symptoms = ['Increased energy', 'Improved mood']
-        recommendations = [
-            'Engage in light exercise',
-            'Eat a balanced diet',
-            'Plan creative or productive tasks',
-        ]
-    elif current_day <= 21:
-        phase_title = 'Ovulation Phase'
-        symptoms = ['Increased libido', 'Mild abdominal pain']
-        recommendations = [
-            'Track ovulation if planning pregnancy',
-            'Stay hydrated',
-            'Avoid strenuous activities if experiencing pain',
-        ]
-    else:
-        phase_title = 'Luteal Phase'
-        symptoms = ['Bloating', 'Breast tenderness', 'Mood swings']
-        recommendations = [
-            'Reduce salt intake to avoid bloating',
-            'Wear comfortable clothing',
-            'Practice relaxation techniques for mood swings',
-        ]
-
-    # Add irregular cycle symptoms and recommendations
+    
+    # Default values
+    phase_title = "Unknown Phase"
+    symptoms = []
+    recommendations = []
+    is_irregular = avg_cycle_length > 35 or len(cycles) < 3
+    
+    # For irregular cycles, use relative percentages
     if is_irregular:
-        symptoms.append('Irregular cycle detected')
-        recommendations.append('Consult a healthcare provider for irregular cycles')
+        menstrual_end = int(avg_cycle_length * 0.15)  # First 15% of cycle
+        follicular_end = int(avg_cycle_length * 0.4)   # Next 25%
+        ovulation_end = int(avg_cycle_length * 0.6)    # Next 20%
+        
+        if current_day <= menstrual_end:
+            phase_title = 'Menstrual Phase (Irregular)'
+            symptoms = [
+                'Cramps (possibly more intense)',
+                'Fatigue',
+                'Irregular bleeding patterns',
+                'Mood swings'
+            ]
+            recommendations = [
+                'Track bleeding patterns carefully',
+                'Consider medical consultation for irregular cycles',
+                'Use heating pads for cramp relief',
+                'Maintain iron-rich diet'
+            ]
+            
+        elif current_day <= follicular_end:
+            phase_title = 'Follicular Phase (Irregular)'
+            symptoms = [
+                'Variable energy levels',
+                'Unpredictable cervical mucus changes',
+                'Inconsistent basal body temperature'
+            ]
+            recommendations = [
+                'Monitor multiple fertility signs',
+                'Be prepared for early ovulation',
+                'Maintain consistent sleep patterns'
+            ]
+            
+        elif current_day <= ovulation_end:
+            phase_title = 'Ovulation Phase (Irregular)'
+            symptoms = [
+                'Possible multiple ovulation attempts',
+                'Unpredictable ovulation pain',
+                'Variable libido changes'
+            ]
+            recommendations = [
+                'Track ovulation with multiple methods',
+                'Have ovulation tests available',
+                'Be aware of possible anovulatory cycles'
+            ]
+            
+        else:  # Luteal phase
+            phase_title = 'Luteal Phase (Irregular)'
+            symptoms = [
+                'Variable PMS symptoms',
+                'Unpredictable mood changes',
+                'Inconsistent cycle length'
+            ]
+            recommendations = [
+                'Track symptom patterns carefully',
+                'Practice stress management techniques',
+                'Be prepared for early or late period'
+            ]
+            
+    else:  # Regular cycles
+        if current_day <= 7:
+            phase_title = 'Menstrual Phase'
+            symptoms = [
+                'Menstrual bleeding',
+                'Cramps',
+                'Fatigue',
+                'Lower back pain'
+            ]
+            recommendations = [
+                'Use period tracking',
+                'Stay hydrated',
+                'Consider pain relief if needed'
+            ]
+            
+        elif current_day <= 14:
+            phase_title = 'Follicular Phase'
+            symptoms = [
+                'Increasing energy',
+                'Dry cervical mucus becoming creamy',
+                'Rising estrogen levels'
+            ]
+            recommendations = [
+                'Good time for exercise',
+                'Focus on nutrition',
+                'Track cervical mucus changes'
+            ]
+            
+        elif current_day <= 21:
+            phase_title = 'Ovulation Phase'
+            symptoms = [
+                'Egg-white cervical mucus',
+                'Increased libido',
+                'Mild ovulation pain (mittelschmerz)'
+            ]
+            recommendations = [
+                'Fertility awareness if trying to conceive',
+                'Stay hydrated',
+                'Monitor basal body temperature'
+            ]
+            
+        else:
+            phase_title = 'Luteal Phase'
+            symptoms = [
+                'PMS symptoms',
+                'Breast tenderness',
+                'Bloating',
+                'Mood changes'
+            ]
+            recommendations = [
+                'Reduce salt intake',
+                'Practice relaxation techniques',
+                'Track PMS symptoms'
+            ]
 
     return {
         'title': phase_title,
         'symptoms': symptoms,
         'recommendations': recommendations,
         'is_irregular': is_irregular,
+        'confidence': 'high' if not is_irregular else 'medium'
     }
 
 def get_period_history(user):
     """
-    Fetch period history for a user and detect irregular cycles.
+    Returns comprehensive period history with analysis and recommendations
     """
     cycles = Cycle.objects.filter(user=user).order_by('start_date')
     if not cycles.exists():
         return None
 
-    # Calculate average cycle length
-    total_cycles = cycles.count()
-    total_cycle_length = sum(cycle.cycle_length for cycle in cycles if cycle.cycle_length is not None)
-    avg_cycle_length = total_cycle_length / total_cycles if total_cycles > 0 else 0
-
-    # Check if the cycle is irregular
-    is_irregular = avg_cycle_length > 28
-
-    # Prepare period history
-    period_history = []
-    for cycle in cycles:
-        period_history.append({
-            'start_date': cycle.start_date,
-            'end_date': cycle.end_date,
-            'cycle_length': cycle.cycle_length,
-            'is_irregular': cycle.cycle_length > 28 if cycle.cycle_length else False,
-        })
-
+    lengths = [c.cycle_length for c in cycles if c.cycle_length]
+    avg_length = sum(lengths) / len(lengths) if lengths else 0
+    variability = max(lengths) - min(lengths) if len(lengths) > 1 else 0
+    is_irregular = avg_length > 35 or variability > 7
+    
     return {
-        'avg_cycle_length': avg_cycle_length,
-        'total_cycles': total_cycles,
-        'period_history': period_history,
-        'is_irregular': is_irregular,
+        'avg_cycle_length': avg_length,
+        'cycle_variability': variability,
+        'irregularity_level': get_irregularity_level(variability, avg_length),
+        'total_cycles': len(cycles),
+        'period_history': [
+            {
+                'start_date': c.start_date,
+                'end_date': c.end_date,
+                'cycle_length': c.cycle_length,
+                'is_irregular': c.cycle_length > 35 if c.cycle_length else False,
+                'notes': get_cycle_notes(c, avg_length)  # Now properly defined
+            } for c in cycles
+        ],
+        'health_recommendations': get_health_recommendations(cycles, avg_length, variability)
     }
+
+def get_cycle_notes(cycle, avg_length):
+    """
+    Generate custom notes for each cycle based on its characteristics
+    """
+    notes = []
+    
+    if not cycle.cycle_length:
+        return ["Cycle length not calculated"]
+    
+    # Length analysis
+    if cycle.cycle_length > 35:
+        notes.append(f"Long cycle ({cycle.cycle_length} days)")
+    elif cycle.cycle_length < 21:
+        notes.append(f"Short cycle ({cycle.cycle_length} days)")
+    
+    # Comparison to average
+    if avg_length and abs(cycle.cycle_length - avg_length) > 5:
+        diff = cycle.cycle_length - avg_length
+        notes.append(f"{abs(diff)} days {'longer' if diff > 0 else 'shorter'} than average")
+    
+    # Flow analysis (if you track this)
+    if hasattr(cycle, 'flow_intensity'):
+        if cycle.flow_intensity == 'heavy':
+            notes.append("Heavy flow noted")
+        elif cycle.flow_intensity == 'light':
+            notes.append("Light flow noted")
+    
+    return notes if notes else ["Normal cycle characteristics"]
+
+def get_health_recommendations(cycles, avg_length, variability):
+    """
+    Generate personalized health recommendations based on cycle history
+    """
+    recommendations = []
+    lengths = [c.cycle_length for c in cycles if c.cycle_length]
+    
+    if not lengths:
+        return ["Track more cycles for personalized recommendations"]
+    
+    # Irregularity recommendations
+    if avg_length > 35:
+        recommendations.append("Your average cycle is longer than typical")
+        recommendations.append("Consider discussing with a healthcare provider")
+    
+    if variability > 7:
+        recommendations.append(f"Your cycle length varies by {variability} days")
+        if variability > 14:
+            recommendations.append("Significant variation - medical consultation recommended")
+    
+    # General health tips
+    recommendations.append("Maintain a balanced diet rich in iron and vitamins")
+    recommendations.append("Track symptoms to identify patterns")
+    
+    # Add specific recommendations based on cycle characteristics
+    if any(c.cycle_length and c.cycle_length < 21 for c in cycles):
+        recommendations.append("Short cycles may indicate hormonal imbalances")
+    
+    if len(cycles) < 6:
+        recommendations.append("Tracking more cycles will improve predictions")
+    
+    return recommendations
+
+def get_irregularity_level(variability, avg_length):
+    """
+    Classify cycle irregularity into levels
+    """
+    if avg_length == 0:
+        return 'unknown'
+    if variability > 14 or avg_length > 40:
+        return 'high'
+    if variability > 7 or avg_length > 35:
+        return 'moderate'
+    return 'low'
+
+def get_irregularity_level(variability, avg_length):
+    if avg_length == 0:
+        return 'unknown'
+    if variability > 15 or avg_length > 35:
+        return 'high'
+    if variability > 7:
+        return 'moderate'
+    return 'low'
+
+def get_health_recommendations(cycles, avg_length, variability):
+    lengths = [c.cycle_length for c in cycles if c.cycle_length]
+    if not lengths:
+        return []
+    
+    variability = max(lengths) - min(lengths) if len(lengths) > 1 else 0
+    avg_length = sum(lengths) / len(lengths)
+    
+    recommendations = []
+    
+    if variability > 15:
+        recommendations.append("Your cycles vary significantly in length")
+        recommendations.append("Consider tracking additional symptoms like temperature")
+    
+    if avg_length > 35:
+        recommendations.append("Your average cycle is longer than typical")
+        recommendations.append("Consult a healthcare provider if this persists")
+    
+    return recommendations
