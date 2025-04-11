@@ -1,3 +1,4 @@
+from venv import logger
 from rest_framework.decorators import api_view,permission_classes
 from django.views.decorators.csrf import csrf_exempt
 from drf_yasg.utils import swagger_auto_schema
@@ -19,8 +20,11 @@ from .utils import (get_average_cycle_length,get_current_day,
                     get_phase)
 from django.contrib.auth import authenticate, login, logout
 
-from datetime import datetime
 
+from datetime import datetime, timedelta
+from django.utils import timezone
+
+#for registering a user
 @swagger_auto_schema(
     method='post',
     operation_description="Register a new user. An OTP will be sent to the user's email for verification.",
@@ -39,39 +43,47 @@ from datetime import datetime
     ),
     responses={
         201: 'User registered successfully. OTP sent to email.',
-        400: 'Invalid input data.',
+        400: 'Invalid input data or email already exists.',
     }
 )
-
 @api_view(['POST'])
 def register_user(request):
     if request.method == 'POST':
         try:
-            # Validate registration data
             validated_data = validate_registration_data(request.data)
+            email = validated_data['email'].lower().strip()
+            
+            existing_user = CustomUser.objects.filter(email__iexact=email).first()
+            
+            if existing_user:
+                if existing_user.is_active:
+                    return Response(
+                        {'error': 'Email already registered.'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                user = existing_user  # Resend OTP for inactive user
+            else:
+                user = create_user(validated_data)
+
+            otp = str(random.randint(100000, 999999))  # 6-digit OTP
+            OTP.objects.filter(email=user.email).delete()  # Clear old OTPs
+            OTP.objects.create(email=user.email, otp=otp)
+            
+            send_mail(
+                'Your OTP Code',
+                f'Your verification code: {otp} (valid for 10 mins)',
+                settings.EMAIL_HOST_USER,
+                [user.email],
+                fail_silently=False,
+            )
+            return Response(
+                {'message': 'OTP sent. Check your email.'},
+                status=status.HTTP_201_CREATED
+            )
         except serializers.ValidationError as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Create the user
-        user = create_user(validated_data)
-
-        # Generate a 4-digit OTP
-        otp = random.randint(1000, 9999)
-
-        # Save the OTP in the database
-        OTP.objects.create(email=user.email, otp=otp)
-
-        # Send the OTP to the user's email
-        send_mail(
-            'Your OTP for Email Verification',
-            f'Your OTP is: {otp}',
-            settings.EMAIL_HOST_USER,
-            [user.email],
-            fail_silently=False,
-        )
-
-        return Response({'message': 'OTP sent to your email. Please verify to complete registration.'}, status=status.HTTP_201_CREATED)
-
+#==========================verify otp======================= 
+            
 @swagger_auto_schema(
     method='post',
     operation_description="Verify the OTP sent to the user's email to activate the account.",
@@ -111,45 +123,108 @@ def verify_otp(request):
 
 @swagger_auto_schema(
     method='post',
-    operation_description="Log in a user using their email and password.",
+    operation_description="Resend OTP to the user's email",
     request_body=openapi.Schema(
         type=openapi.TYPE_OBJECT,
         properties={
             'email': openapi.Schema(type=openapi.TYPE_STRING, description='User email'),
-            'password': openapi.Schema(type=openapi.TYPE_STRING, description='User password'),
         },
-        required=['email', 'password'],
+        required=['email'],
     ),
     responses={
-        200: 'Login successful.',
-        400: 'Invalid email or password.',
+        200: 'OTP resent successfully',
+        400: 'Invalid email or no account found',
+        403: 'Account already activated',
+        429: 'Too many OTP requests',
     }
 )
+@api_view(['POST'])
+def resend_otp(request):
+    email = request.data.get('email', '').lower().strip()
+    
+    try:
+        user = CustomUser.objects.get(email=email)
+        if user.is_active:
+            return Response(
+                {'error': 'Account already active.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+    except CustomUser.DoesNotExist:
+        return Response(
+            {'error': 'Email not registered.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # Rate limiting (3 OTPs/hour max)
+    last_hour = timezone.now() - timedelta(hours=1)
+    recent_otps = OTP.objects.filter(email=email, created_at__gte=last_hour).count()
+    if recent_otps >= 3:
+        return Response(
+            {'error': 'Too many attempts. Try later.'},
+            status=status.HTTP_429_TOO_MANY_REQUESTS
+        )
+
+    otp = str(random.randint(100000, 999999))
+    OTP.objects.filter(email=email).delete()
+    OTP.objects.create(email=email, otp=otp)
+
+    send_mail(
+        'Your New OTP',
+        f'New OTP: {otp}',
+        settings.EMAIL_HOST_USER,
+        [email],
+        fail_silently=False,
+    )
+    return Response(
+        {'message': 'OTP resent.'},
+        status=status.HTTP_200_OK
+    )
 
 @api_view(['POST'])
 def login_user(request):
-    if request.method == 'POST':
-        try:
-            # Validate login data
-            validated_data = validate_login_data(request.data)
-        except serializers.ValidationError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    email = request.data.get('email', '').lower().strip()
+    password = request.data.get('password')
 
-        # Log the user in
-        user = validated_data['user']
-        login(request, user)
-        return Response({'message': 'Login successful'}, status=status.HTTP_200_OK)
-    
+    if not email or not password:
+        return Response(
+            {'error': 'Email and password required.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+        user = CustomUser.objects.get(email=email)
+    except CustomUser.DoesNotExist:
+        return Response(
+            {'error': 'User not found.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if not user.is_active:
+        return Response(
+            {'error': 'Verify your email first.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if not user.check_password(password):
+        return Response(
+            {'error': 'Incorrect password.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    login(request, user)
+    return Response(
+        {'message': 'Login successful.'},
+        status=status.HTTP_200_OK
+    )
+
 @swagger_auto_schema(
     method='post',
     operation_description="Log out the authenticated user.",
     responses={
         200: 'Logout successful.',
-        401: 'User is not authenticated.',
-        500: 'Internal server error.',
+        401: 'User not authenticated.',
     }
 )
-
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def logout_user(request):

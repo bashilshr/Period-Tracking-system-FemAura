@@ -9,4 +9,5 @@ urlpatterns = [
    path('predict-cycle/', views.predict_cycle, name='predict_cycle'),
    path('get-period-history/', views.period_history, name='get_period_history'),
    path('log-cycle/', views.log_cycle, name='log_period'),
+   path('resend-otp/', views.resend_otp, name='resend_otp'),
 ]
