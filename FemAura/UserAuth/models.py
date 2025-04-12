@@ -28,9 +28,6 @@ class CustomUserManager(BaseUserManager):
 class CustomUser(AbstractUser):
     objects = CustomUserManager() 
     email = models.EmailField(unique=True)
-    last_period_date = models.DateField(null=True, blank=True)
-    cycle_first_day = models.DateField(null=True, blank=True)
-    cycle_length = models.IntegerField(null=True, blank=True)
     is_active = models.BooleanField(default=False)  # User is inactive until email is verified
 
     # Use email as the username field

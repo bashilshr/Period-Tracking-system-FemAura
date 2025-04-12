@@ -35,9 +35,6 @@ from django.utils import timezone
             'email': openapi.Schema(type=openapi.TYPE_STRING, description='User email'),
             'password': openapi.Schema(type=openapi.TYPE_STRING, description='User password'),
             'confirmpassword': openapi.Schema(type=openapi.TYPE_STRING, description='Confirm password'),
-            'last_period_date': openapi.Schema(type=openapi.TYPE_STRING, format='date', description='Last period date'),
-            'cycle_first_day': openapi.Schema(type=openapi.TYPE_STRING, format='date', description='Cycle first day'),
-            'cycle_length': openapi.Schema(type=openapi.TYPE_INTEGER, description='Cycle length in days'),
         },
         required=['email', 'password', 'confirmpassword'],
     ),
@@ -179,7 +176,51 @@ def resend_otp(request):
         {'message': 'OTP resent.'},
         status=status.HTTP_200_OK
     )
-
+@swagger_auto_schema(
+    method='post',
+    operation_description="Authenticate a user with email and password",
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        properties={
+            'email': openapi.Schema(
+                type=openapi.TYPE_STRING, 
+                format='email',
+                description="User's registered email address",
+            ),
+            'password': openapi.Schema(
+                type=openapi.TYPE_STRING,
+                format='password',
+                description="User's password",
+            ),
+        },
+        required=['email', 'password'],
+    ),
+    responses={
+        200: openapi.Response(
+            description="Login Successful",
+            schema=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'message': openapi.Schema(
+                        type=openapi.TYPE_STRING,
+                    ),
+                },
+            ),
+        ),
+        400: openapi.Response(
+            description="Bad Request",
+            schema=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'error': openapi.Schema(
+                        type=openapi.TYPE_STRING,
+                    ),
+                },
+            ),
+        ),
+    },
+    security=[]
+)
 @api_view(['POST'])
 def login_user(request):
     email = request.data.get('email', '').lower().strip()
@@ -216,7 +257,6 @@ def login_user(request):
         {'message': 'Login successful.'},
         status=status.HTTP_200_OK
     )
-
 @swagger_auto_schema(
     method='post',
     operation_description="Log out the authenticated user.",

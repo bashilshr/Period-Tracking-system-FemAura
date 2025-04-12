@@ -10,8 +10,10 @@ pillow==11.1.0
 psycopg2==2.9.10
 psycopg2-binary==2.9.10
 PyJWT==2.10.1
+python-dateutil==2.9.0.post0
 pytz==2025.1
 PyYAML==6.0.2
+six==1.17.0
 sqlparse==0.5.3
 tzdata==2025.1
 uritemplate==4.1.1

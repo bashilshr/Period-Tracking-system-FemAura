@@ -64,3 +64,4 @@ def validate_otp_data(data):
 
     data['otp_record'] = otp_record
     return data
+
