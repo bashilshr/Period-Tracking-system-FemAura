@@ -1,16 +1,4 @@
-<<<<<<< HEAD
-from venv import logger
-from rest_framework.decorators import api_view,permission_classes
-from django.views.decorators.csrf import csrf_exempt
-from drf_yasg.utils import swagger_auto_schema
-from rest_framework.response import Response
-from .models import CustomUser, OTP, Cycle
-from rest_framework.permissions import IsAuthenticated
-from rest_framework import status
-from drf_yasg import openapi
-=======
 from django.contrib.auth import login, logout, update_session_auth_hash
->>>>>>> feature-export-data
 from django.core.mail import send_mail
 from django.http import HttpResponse
 from django.contrib.auth import authenticate
@@ -23,8 +11,6 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.tokens import RefreshToken
 
-<<<<<<< HEAD
-=======
 from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 from reportlab.lib.pagesizes import letter
@@ -58,7 +44,6 @@ from .utils import (
     get_period_history,
     get_phase,
 )
->>>>>>> feature-export-data
 
 from datetime import datetime, timedelta
 from django.utils import timezone
@@ -97,27 +82,17 @@ def register_user(request):
                         {'error': 'Email already registered.'},
                         status=status.HTTP_400_BAD_REQUEST
                     )
-<<<<<<< HEAD
-                user = existing_user  # Resend OTP for inactive user
-            else:
-                user = create_user(validated_data)
-
-=======
                 # Resend OTP to inactive user
                 user = existing_user
             else:
                 user = create_user(validated_data)
 
             # Generate OTP
->>>>>>> feature-export-data
             otp = str(random.randint(100000, 999999))  # 6-digit OTP
             OTP.objects.filter(email=user.email).delete()  # Clear old OTPs
             OTP.objects.create(email=user.email, otp=otp)
             
-<<<<<<< HEAD
-=======
             # Send OTP email
->>>>>>> feature-export-data
             send_mail(
                 'Your OTP Code',
                 f'Your verification code: {otp} (valid for 10 mins)',
@@ -125,16 +100,6 @@ def register_user(request):
                 [user.email],
                 fail_silently=False,
             )
-<<<<<<< HEAD
-            return Response(
-                {'message': 'OTP sent. Check your email.'},
-                status=status.HTTP_201_CREATED
-            )
-        except serializers.ValidationError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-#==========================verify otp======================= 
-            
-=======
             
             return Response(
                 {'message': 'OTP sent to your email. Please verify to complete registration.'},
@@ -153,7 +118,6 @@ def register_user(request):
                 {'error': 'An error occurred during registration.'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
->>>>>>> feature-export-data
 @swagger_auto_schema(
     method='post',
     operation_description="Verify the OTP sent to the user's email to activate the account.",
@@ -193,111 +157,16 @@ def verify_otp(request):
 
 @swagger_auto_schema(
     method='post',
-<<<<<<< HEAD
-    operation_description="Resend OTP to the user's email",
-    request_body=openapi.Schema(
-        type=openapi.TYPE_OBJECT,
-        properties={
-            'email': openapi.Schema(type=openapi.TYPE_STRING, description='User email'),
-=======
     operation_description="Log in a user and return JWT tokens.",
     request_body=openapi.Schema(
         type=openapi.TYPE_OBJECT,
         properties={
             'email': openapi.Schema(type=openapi.TYPE_STRING),
             'password': openapi.Schema(type=openapi.TYPE_STRING),
->>>>>>> feature-export-data
         },
         required=['email'],
     ),
     responses={
-<<<<<<< HEAD
-        200: 'OTP resent successfully',
-        400: 'Invalid email or no account found',
-        403: 'Account already activated',
-        429: 'Too many OTP requests',
-    }
-)
-@api_view(['POST'])
-def resend_otp(request):
-    email = request.data.get('email', '').lower().strip()
-    
-    try:
-        user = CustomUser.objects.get(email=email)
-        if user.is_active:
-            return Response(
-                {'error': 'Account already active.'},
-                status=status.HTTP_403_FORBIDDEN
-            )
-    except CustomUser.DoesNotExist:
-        return Response(
-            {'error': 'Email not registered.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Rate limiting (3 OTPs/hour max)
-    last_hour = timezone.now() - timedelta(hours=1)
-    recent_otps = OTP.objects.filter(email=email, created_at__gte=last_hour).count()
-    if recent_otps >= 3:
-        return Response(
-            {'error': 'Too many attempts. Try later.'},
-            status=status.HTTP_429_TOO_MANY_REQUESTS
-        )
-
-    otp = str(random.randint(100000, 999999))
-    OTP.objects.filter(email=email).delete()
-    OTP.objects.create(email=email, otp=otp)
-
-    send_mail(
-        'Your New OTP',
-        f'New OTP: {otp}',
-        settings.EMAIL_HOST_USER,
-        [email],
-        fail_silently=False,
-    )
-    return Response(
-        {'message': 'OTP resent.'},
-        status=status.HTTP_200_OK
-    )
-
-@api_view(['POST'])
-def login_user(request):
-    email = request.data.get('email', '').lower().strip()
-    password = request.data.get('password')
-
-    if not email or not password:
-        return Response(
-            {'error': 'Email and password required.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    try:
-        user = CustomUser.objects.get(email=email)
-    except CustomUser.DoesNotExist:
-        return Response(
-            {'error': 'User not found.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    if not user.is_active:
-        return Response(
-            {'error': 'Verify your email first.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    if not user.check_password(password):
-        return Response(
-            {'error': 'Incorrect password.'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    login(request, user)
-    return Response(
-        {'message': 'Login successful.'},
-        status=status.HTTP_200_OK
-    )
-
-=======
         200: openapi.Response(
             description="Login successful",
             schema=openapi.Schema(
@@ -355,7 +224,6 @@ def login_user(request):
             {'error': str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
->>>>>>> feature-export-data
 @swagger_auto_schema(
     method='post',
     operation_description="Log out the authenticated user.",
