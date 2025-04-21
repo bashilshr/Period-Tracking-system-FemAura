@@ -3,7 +3,6 @@ from django.contrib.auth import authenticate
 from .models import CustomUser, OTP
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
-
 # Function to validate registration data
 def validate_registration_data(data):
     if data['password'] != data['confirmpassword']:
@@ -64,3 +63,47 @@ def validate_otp_data(data):
 
     data['otp_record'] = otp_record
     return data
+class ExportDataSerializer(serializers.Serializer):
+    start_date = serializers.DateField(required=False)
+    end_date = serializers.DateField(required=False)
+    format = serializers.ChoiceField(
+        choices=['csv', 'json', 'pdf'], 
+        default='csv'
+    )
+    
+class RequestPasswordResetSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+class VerifyOTPSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    otp = serializers.CharField(max_length=6)
+
+class NewPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    otp = serializers.CharField(max_length=6)
+    new_password = serializers.CharField(write_only=True)
+    confirm_password = serializers.CharField(write_only=True)
+
+    def validate(self, data):
+        if data['new_password'] != data['confirm_password']:
+            raise serializers.ValidationError("Passwords don't match")
+        validate_password(data['new_password'])
+        return data
+#crud operation for user account
+class UserProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomUser
+        fields = ['id', 'username', 'email', ]
+        read_only_fields = ['email'] 
+
+class ChangePasswordSerializer(serializers.Serializer):
+    old_password = serializers.CharField(required=True)
+    new_password = serializers.CharField(required=True)
+    confirm_password = serializers.CharField(required=True)
+
+    def validate(self, data):
+        if data['new_password'] != data['confirm_password']:
+            raise serializers.ValidationError("New passwords don't match")
+        validate_password(data['new_password'])
+        return data
+

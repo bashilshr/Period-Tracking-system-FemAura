@@ -28,9 +28,6 @@ class CustomUserManager(BaseUserManager):
 class CustomUser(AbstractUser):
     objects = CustomUserManager() 
     email = models.EmailField(unique=True)
-    last_period_date = models.DateField(null=True, blank=True)
-    cycle_first_day = models.DateField(null=True, blank=True)
-    cycle_length = models.IntegerField(null=True, blank=True)
     is_active = models.BooleanField(default=False)  # User is inactive until email is verified
 
     # Use email as the username field
@@ -47,7 +44,6 @@ class OTP(models.Model):
     otp = models.CharField(max_length=6)  # Changed to 6 digits
     created_at = models.DateTimeField(auto_now_add=True)
     attempts = models.PositiveIntegerField(default=1)  # Add this field
-    
     def __str__(self):
         return f"{self.email} - {self.otp}"
 
@@ -71,8 +67,16 @@ class Cycle(models.Model):
 class Symptom(models.Model):
     cycle = models.ForeignKey(Cycle, on_delete=models.CASCADE)  # Link to the cycle
     symptom = models.CharField(max_length=100)  # Symptom name (e.g., cramps)
-    intensity = models.IntegerField()  # Intensity of the symptom (1-10)
-
+    date = models.DateField(null=True, blank= True)  # Date of the symptom occurrence
 class Mood(models.Model):
     cycle = models.ForeignKey(Cycle, on_delete=models.CASCADE)  # Link to the cycle
     mood = models.CharField(max_length=100)  # Mood (e.g., happy, stressed)
+    date = models.DateField(null= True, blank= True)  # Date of the mood occurrence
+class PasswordResetOTP(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    otp = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_verified = models.BooleanField(default=False)
+    
+    def is_expired(self):
+        return timezone.now() - self.created_at > timedelta(minutes=15)
