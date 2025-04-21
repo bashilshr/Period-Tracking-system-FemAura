@@ -9,9 +9,6 @@ urlpatterns = [
    path('predict-cycle/', views.predict_cycle, name='predict_cycle'),
    path('get-period-history/', views.period_history, name='get_period_history'),
    path('log-cycle/', views.log_cycle, name='log_period'),
-<<<<<<< HEAD
-   path('resend-otp/', views.resend_otp, name='resend_otp'),
-=======
    path('export-data/', views.export_user_data, name='export-data'),
    path('request-password-reset/', views.request_password_reset, name='request_password_reset'),
     path('verify-otp_password/', views.verify_otp_password, name='verify_otp_password'),
@@ -21,5 +18,4 @@ urlpatterns = [
     path('profile/delete/', views.delete_account, name='delete-account'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('api/token/protected/', views.protected_data, name='protected_data'),
->>>>>>> feature-export-data
 ]
