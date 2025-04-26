@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import authenticate
-from .models import CustomUser, OTP
+from .models import CustomUser, OTP, DailyLog, DailySymptom, DailyMood, Cycle
+from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 # Function to validate registration data
@@ -107,3 +108,75 @@ class ChangePasswordSerializer(serializers.Serializer):
         validate_password(data['new_password'])
         return data
 
+class DailySymptomSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DailySymptom
+        fields = ['id', 'symptom']
+        extra_kwargs = {
+            'symptom': {'required': True}
+        }
+
+    def validate_symptom(self, value):
+        if value not in dict(DailySymptom.SYMPTOM_CHOICES):
+            raise serializers.ValidationError("Invalid symptom selection")
+        return value
+
+class DailyMoodSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DailyMood
+        fields = ['id', 'mood']
+        extra_kwargs = {
+            'mood': {'required': True}
+        }
+
+    def validate_mood(self, value):
+        if value not in dict(DailyMood.MOOD_CHOICES):
+            raise serializers.ValidationError("Invalid mood selection")
+        return value
+
+class DailyLogSerializer(serializers.ModelSerializer):
+    symptoms = DailySymptomSerializer(many=True, required=False)
+    moods = DailyMoodSerializer(many=True, required=False)
+
+    class Meta:
+        model = DailyLog
+        fields = ['id', 'date', 'experience', 'symptoms', 'moods']
+        extra_kwargs = {
+            'date': {'required': False},
+            'experience': {'required': False}
+        }
+
+    def create(self, validated_data):
+        symptoms_data = validated_data.pop('symptoms', [])
+        moods_data = validated_data.pop('moods', [])
+        
+        log, created = DailyLog.objects.update_or_create(
+            user=validated_data['user'],
+            date=validated_data.get('date', timezone.now().date()),
+            defaults=validated_data
+        )
+        
+        # Handle symptoms
+        DailySymptom.objects.filter(daily_log=log).delete()
+        for symptom_data in symptoms_data:
+            DailySymptom.objects.create(daily_log=log, **symptom_data)
+        
+        # Handle moods
+        DailyMood.objects.filter(daily_log=log).delete()
+        for mood_data in moods_data:
+            DailyMood.objects.create(daily_log=log, **mood_data)
+        
+        # Link to cycle
+        self._link_to_cycle(log)
+        return log
+
+    def _link_to_cycle(self, log):
+        if not log.cycle:
+            cycle = Cycle.objects.filter(
+                user=log.user,
+                start_date__lte=log.date,
+                end_date__gte=log.date
+            ).first()
+            if cycle:
+                log.cycle = cycle
+                log.save()

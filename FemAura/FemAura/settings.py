@@ -53,6 +53,8 @@ INSTALLED_APPS = [
      'rest_framework_simplejwt',
     'rest_framework.authtoken',
     'drf_yasg',
+    
+    'corsheaders',
 
     'UserAuth',
 ]
@@ -62,11 +64,12 @@ MIDDLEWARE = [
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
-
+CORS_ALLOW_ALL_ORIGINS = True
 ROOT_URLCONF = 'FemAura.urls'
 
 TEMPLATES = [
@@ -155,6 +158,7 @@ SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),  
     'AUTH_HEADER_TYPES': ('Bearer',),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    'ROTATE_REFRESH_TOKENS': True,
     'AUTH_TOKEN_CLASSES': ('rest_framework_simplejwt.tokens.AccessToken',),  
 }
 
