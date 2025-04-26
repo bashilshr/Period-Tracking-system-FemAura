@@ -26,7 +26,13 @@ import random
 from datetime import datetime
 from io import BytesIO
 
-from .models import (ContentRecommendation, CustomUser, OTP, Cycle, PasswordResetOTP, Symptom, Mood,DailyLog,DailyMood,DailySymptom)
+from .models import (ContentRecommendation,
+                     CustomUser, OTP,
+                     Cycle, PasswordResetOTP,
+                     Symptom, Mood,
+                     DailyLog,
+                     DailyMood,
+                     DailySymptom)
 
 from .auth_backends import EmailAuthBackend
 
@@ -49,13 +55,21 @@ from .utils import (
     get_phase,
     get_daily_data,
     get_phase_prediction
-    
 )
 
 from datetime import datetime, timedelta
 from django.utils import timezone
 
-#for registering a user
+def handle_error(error, message, status_code):
+    """Helper function to standardize error responses"""
+    return Response(
+        {
+            "error": str(error),
+            "message": message
+        },
+        status=status_code
+    )
+    
 @swagger_auto_schema(
     method='post',
     operation_description="Register a new user. An OTP will be sent to the user's email for verification.",
@@ -85,9 +99,10 @@ def register_user(request):
             
             if existing_user:
                 if existing_user.is_active:
-                    return Response(
-                        {'error': 'Email already registered.'},
-                        status=status.HTTP_400_BAD_REQUEST
+                    return handle_error(
+                        "Email exists",
+                        "Email already registered.",
+                        status.HTTP_400_BAD_REQUEST
                     )
                 # Resend OTP to inactive user
                 user = existing_user
@@ -114,17 +129,19 @@ def register_user(request):
             )
             
         except serializers.ValidationError as e:
-            # Handle validation errors from validate_registration_data
-            return Response(
-                {'error': e.detail if hasattr(e, 'detail') else str(e)},
-                status=status.HTTP_400_BAD_REQUEST
+            return handle_error(
+                e.detail if hasattr(e, 'detail') else str(e),
+                "Validation failed",
+                status.HTTP_400_BAD_REQUEST
             )
         except Exception as e:
-            # Handle unexpected errors
-            return Response(
-                {'error': 'An error occurred during registration.'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            logger.error(f"Registration error: {str(e)}")
+            return handle_error(
+                "Registration failed",
+                "An error occurred during registration.",
+                status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
 @swagger_auto_schema(
     method='post',
     operation_description="Verify the OTP sent to the user's email to activate the account.",
@@ -144,13 +161,17 @@ def register_user(request):
 
 @api_view(['POST'])
 def verify_otp(request):
-    if request.method == 'POST':
-        try:
-            # Validate OTP data
-            validated_data = validate_otp_data(request.data)
-        except serializers.ValidationError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        # Validate OTP data
+        validated_data = validate_otp_data(request.data)
+    except serializers.ValidationError as e:
+        return handle_error(
+            e.detail,
+            "Invalid OTP data",
+            status.HTTP_400_BAD_REQUEST
+        )
 
+    try:
         # Activate the user
         otp_record = validated_data['otp_record']
         user = CustomUser.objects.get(email=otp_record.email)
@@ -160,7 +181,17 @@ def verify_otp(request):
         # Delete the OTP record 
         otp_record.delete()
 
-        return Response({'message': 'Email verified successfully. You can now log in.'}, status=status.HTTP_200_OK)
+        return Response(
+            {'message': 'Email verified successfully. You can now log in.'},
+            status=status.HTTP_200_OK
+        )
+    except Exception as e:
+        logger.error(f"OTP verification error: {str(e)}")
+        return handle_error(
+            "Verification failed",
+            "Could not verify OTP",
+            status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 @swagger_auto_schema(
     method='post',
@@ -190,17 +221,17 @@ def verify_otp(request):
 @api_view(['POST'])
 def login_user(request):
     try:
-        # Get credentials from request DATA, not POST
         email = request.data.get('email', '').lower().strip()
         password = request.data.get('password', '')
         
         if not email or not password:
-            return Response(
-                {'error': 'Both email and password are required'},
-                status=status.HTTP_400_BAD_REQUEST
+            return handle_error(
+                "Missing credentials",
+                "Both email and password are required",
+                status.HTTP_400_BAD_REQUEST
             )
 
-        # Explicitly use your backend
+        # Authenticate using custom backend
         user = authenticate(
             request,
             email=email,
@@ -209,15 +240,17 @@ def login_user(request):
         )
         
         if user is None:
-            return Response(
-                {'error': 'Invalid email or password'},
-                status=status.HTTP_401_UNAUTHORIZED
+            return handle_error(
+                "Invalid credentials",
+                "Invalid email or password",
+                status.HTTP_401_UNAUTHORIZED
             )
 
         if not user.is_active:
-            return Response(
-                {'error': 'Account is not active'},
-                status=status.HTTP_403_FORBIDDEN
+            return handle_error(
+                "Inactive account",
+                "Account is not active",
+                status.HTTP_403_FORBIDDEN
             )
 
         refresh = RefreshToken.for_user(user)
@@ -227,10 +260,13 @@ def login_user(request):
         }, status=status.HTTP_200_OK)
 
     except Exception as e:
-        return Response(
-            {'error': str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        logger.error(f"Login error: {str(e)}")
+        return handle_error(
+            "Login failed",
+            "An error occurred during login",
+            status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
 @swagger_auto_schema(
     method='post',
     operation_description="Log out the authenticated user.",
@@ -243,14 +279,19 @@ def login_user(request):
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def logout_user(request):
-    """
-    Log out the authenticated user.
-    """
     try:
         logout(request)
-        return Response({'message': 'Logout successful'}, status=status.HTTP_200_OK)
+        return Response(
+            {'message': 'Logout successful'},
+            status=status.HTTP_200_OK
+        )
     except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        logger.error(f"Logout error: {str(e)}")
+        return handle_error(
+            "Logout failed",
+            "An error occurred during logout",
+            status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
     
 #==========================prediction of cycle=======================
 #swagger for period tracking from users input
@@ -273,15 +314,6 @@ def logout_user(request):
         },
         required=['start_date', 'end_date']
     ),
-    manual_parameters=[
-        openapi.Parameter(
-            'Authorization',
-            openapi.IN_HEADER,
-            description='JWT Token',
-            type=openapi.TYPE_STRING,
-            required=True
-        )
-    ],
     responses={
         201: openapi.Response(
             description='Cycle logged successfully',
@@ -314,10 +346,6 @@ def logout_user(request):
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def log_cycle(request):
-    """
-    Log a new menstrual cycle for the authenticated user.
-    Requires JWT authentication.
-    """
     try:
         user = request.user
         start_date_str = request.data.get('start_date')
@@ -325,26 +353,28 @@ def log_cycle(request):
 
         # Validate input data
         if not start_date_str or not end_date_str:
-            return Response(
-                {'error': 'Both start_date and end_date are required'},
-                status=status.HTTP_400_BAD_REQUEST
+            return handle_error(
+                "Missing data",
+                "Both start_date and end_date are required",
+                status.HTTP_400_BAD_REQUEST
             )
 
         try:
-            # Parse the input strings into date objects
             start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
             end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
         except ValueError:
-            return Response(
-                {'error': 'Invalid date format. Use YYYY-MM-DD'},
-                status=status.HTTP_400_BAD_REQUEST
+            return handle_error(
+                "Invalid format",
+                "Invalid date format. Use YYYY-MM-DD",
+                status.HTTP_400_BAD_REQUEST
             )
 
         # Validate date logic
         if end_date <= start_date:
-            return Response(
-                {'error': 'end_date must be after start_date'},
-                status=status.HTTP_400_BAD_REQUEST
+            return handle_error(
+                "Invalid date range",
+                "end_date must be after start_date",
+                status.HTTP_400_BAD_REQUEST
             )
         
         # Check for overlapping cycles
@@ -355,9 +385,10 @@ def log_cycle(request):
         ).exists()
         
         if overlapping_cycles:
-            return Response(
-                {'error': 'This cycle overlaps with an existing record'},
-                status=status.HTTP_400_BAD_REQUEST
+            return handle_error(
+                "Cycle overlap",
+                "This cycle overlaps with an existing record",
+                status.HTTP_400_BAD_REQUEST
             )
 
         # Create and save the Cycle instance
@@ -374,12 +405,13 @@ def log_cycle(request):
         )
         
     except Exception as e:
-        return Response(
-            {'error': str(e)},
-            status=status.HTTP_400_BAD_REQUEST
+        logger.error(f"Cycle logging error: {str(e)}")
+        return handle_error(
+            "Cycle logging failed",
+            "An error occurred while logging cycle",
+            status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-        
-#swagger for prediction of cycle
+
 @swagger_auto_schema(
     method='get',
     operation_description="Predict cycle-related information for the authenticated user.",
@@ -389,14 +421,14 @@ def log_cycle(request):
             schema=openapi.Schema(
                 type=openapi.TYPE_OBJECT,
                 properties={
-                    'avg_cycle_length': openapi.Schema(type=openapi.TYPE_INTEGER, description='Average cycle length'),
-                    'current_day': openapi.Schema(type=openapi.TYPE_INTEGER, description='Current day of the cycle'),
-                    'ovulation_status': openapi.Schema(type=openapi.TYPE_STRING, description='Ovulation status'),
+                    'avg_cycle_length': openapi.Schema(type=openapi.TYPE_INTEGER),
+                    'current_day': openapi.Schema(type=openapi.TYPE_INTEGER),
+                    'ovulation_status': openapi.Schema(type=openapi.TYPE_STRING),
                     'phase': openapi.Schema(
                         type=openapi.TYPE_OBJECT,
                         properties={
-                            'title': openapi.Schema(type=openapi.TYPE_STRING, description='Phase title'),
-                            'symptoms': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING), description='Common symptoms'),
+                            'title': openapi.Schema(type=openapi.TYPE_STRING),
+                            'symptoms': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING)),
                         },
                     ),
                 },
@@ -409,9 +441,6 @@ def log_cycle(request):
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def predict_cycle(request):
-    """
-    Predict cycle-related information for the authenticated user.
-    """
     try:
         user = request.user
         avg_cycle_length = get_average_cycle_length(user)
@@ -426,7 +455,12 @@ def predict_cycle(request):
             'phase': phase,
         }, status=status.HTTP_200_OK)
     except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        logger.error(f"Cycle prediction error: {str(e)}")
+        return handle_error(
+            "Prediction failed",
+            "Could not predict cycle information",
+            status.HTTP_400_BAD_REQUEST
+        )
 
 @swagger_auto_schema(
     method='get',
@@ -558,112 +592,143 @@ def export_user_data(request):
         return export_to_pdf(export_data, request.user)
     
 def export_to_csv(data):
-    response = HttpResponse(content_type='text/csv')
-    response['Content-Disposition'] = 'attachment; filename="period_data_export.csv"'
-    
-    writer = csv.writer(response)
-    
-    # Summary Section
-    writer.writerow(['Total Cycles', data['summary']['total_cycles']])
-    writer.writerow(['Irregular Cycles', data['summary']['irregular_count']])
-    writer.writerow([])
-    
-    if data['summary']['irregular_dates']:
-        writer.writerow(['Irregular Cycle Dates'])
-        for irregular in data['summary']['irregular_dates']:
-            writer.writerow([f"{irregular['start_date']} to {irregular['end_date']}"])
-        writer.writerow([])
-    
-    # Cycle Details
-    writer.writerow(['Cycle Details'])
-    writer.writerow(['Start Date', 'End Date', 'Length', 'Irregular?', 'Symptoms', 'Moods'])
-    
-    for cycle in data['cycles']:
-        symptoms = "; ".join(f"{s['date']}: {s['symptom']}" for s in cycle['symptoms'])
-        moods = "; ".join(f"{m['date']}: {m['mood']}" for m in cycle['moods'])
+    try:
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="period_data_export.csv"'
         
-        writer.writerow([
-            cycle['start_date'],
-            cycle['end_date'],
-            cycle['cycle_length'],
-            'Yes' if cycle['is_irregular'] else 'No',
-            symptoms,
-            moods
-        ])
-    
-    return response
+        writer = csv.writer(response)
+        
+        # Summary Section
+        writer.writerow(['Total Cycles', data['summary']['total_cycles']])
+        writer.writerow(['Irregular Cycles', data['summary']['irregular_count']])
+        writer.writerow([])
+        
+        if data['summary']['irregular_dates']:
+            writer.writerow(['Irregular Cycle Dates'])
+            for irregular in data['summary']['irregular_dates']:
+                writer.writerow([f"{irregular['start_date']} to {irregular['end_date']}"])
+            writer.writerow([])
+        
+        # Cycle Details
+        writer.writerow(['Cycle Details'])
+        writer.writerow(['Start Date', 'End Date', 'Length', 'Irregular?', 'Symptoms', 'Moods'])
+        
+        for cycle in data['cycles']:
+            symptoms = "; ".join(f"{s['date']}: {s['symptom']}" for s in cycle['symptoms'])
+            moods = "; ".join(f"{m['date']}: {m['mood']}" for m in cycle['moods'])
+            
+            writer.writerow([
+                cycle['start_date'],
+                cycle['end_date'],
+                cycle['cycle_length'],
+                'Yes' if cycle['is_irregular'] else 'No',
+                symptoms,
+                moods
+            ])
+        
+        return response
+    except Exception as e:
+        logger.error(f"CSV export error: {str(e)}")
+        return HttpResponse(
+            json.dumps({
+                "error": "CSV generation failed",
+                "message": str(e)
+            }),
+            content_type='application/json',
+            status=500
+        )
 
 def export_to_json(data):
-    response = HttpResponse(
-        json.dumps(data, indent=4, default=str),
-        content_type='application/json'
-    )
-    response['Content-Disposition'] = 'attachment; filename="period_data_export.json"'
-    return response
+    try:
+        response = HttpResponse(
+            json.dumps(data, indent=4, default=str),
+            content_type='application/json'
+        )
+        response['Content-Disposition'] = 'attachment; filename="period_data_export.json"'
+        return response
+    except Exception as e:
+        logger.error(f"JSON export error: {str(e)}")
+        return HttpResponse(
+            json.dumps({
+                "error": "JSON generation failed",
+                "message": str(e)
+            }),
+            content_type='application/json',
+            status=500
+        )
 
 def export_to_pdf(data, user):
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter)
-    styles = getSampleStyleSheet()
-    story = []
-    
-    # Title
-    story.append(Paragraph("Period Data Export", styles['Title']))
-    story.append(Spacer(1, 12))
-    
-    # Summary Section
-    story.append(Paragraph("Summary", styles['Heading2']))
-    story.append(Paragraph(f"Total Cycles: {data['summary']['total_cycles']}", styles['Normal']))
-    story.append(Paragraph(f"Irregular Cycles: {data['summary']['irregular_count']}", styles['Normal']))
-    
-    if data['summary']['irregular_dates']:
-        story.append(Spacer(1, 6))
-        story.append(Paragraph("Irregular Dates:", styles['Heading3']))
-        for irregular in data['summary']['irregular_dates']:
-            story.append(Paragraph(
-                f"- {irregular['start_date']} to {irregular['end_date']}",
-                styles['Normal']
-            ))
-    
-    story.append(Spacer(1, 12))
-    
-    # Cycle Details
-    story.append(Paragraph("Cycle History", styles['Heading2']))
-    for cycle in data['cycles']:
-        # Header
-        header_text = (
-            f"Cycle: {cycle['start_date']} to {cycle['end_date']} | "
-            f"Length: {cycle['cycle_length']} days | "
-            f"Irregular: {'Yes' if cycle['is_irregular'] else 'No'}"
-        )
-        story.append(Paragraph(header_text, styles['Heading3']))
-        story.append(Spacer(1, 6))
+    try:
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter)
+        styles = getSampleStyleSheet()
+        story = []
         
-        # Symptoms
-        if cycle['symptoms']:
-            story.append(Paragraph("Symptoms:", styles['Heading4']))
-            for symptom in cycle['symptoms']:
-                story.append(Paragraph(
-                    f"- {symptom['date']}: {symptom['symptom']}",
-                    styles['Normal']
-                ))
+        # Title
+        story.append(Paragraph("Period Data Export", styles['Title']))
+        story.append(Spacer(1, 12))
         
-        # Moods
-        if cycle['moods']:
-            story.append(Paragraph("Moods:", styles['Heading4']))
-            for mood in cycle['moods']:
+        # Summary Section
+        story.append(Paragraph("Summary", styles['Heading2']))
+        story.append(Paragraph(f"Total Cycles: {data['summary']['total_cycles']}", styles['Normal']))
+        story.append(Paragraph(f"Irregular Cycles: {data['summary']['irregular_count']}", styles['Normal']))
+        
+        if data['summary']['irregular_dates']:
+            story.append(Spacer(1, 6))
+            story.append(Paragraph("Irregular Dates:", styles['Heading3']))
+            for irregular in data['summary']['irregular_dates']:
                 story.append(Paragraph(
-                    f"- {mood['date']}: {mood['mood']}",
+                    f"- {irregular['start_date']} to {irregular['end_date']}",
                     styles['Normal']
                 ))
         
         story.append(Spacer(1, 12))
-    
-    doc.build(story)
-    response = HttpResponse(buffer.getvalue(), content_type='application/pdf')
-    response['Content-Disposition'] = f'attachment; filename="period_export_{user.username}.pdf"'
-    buffer.close()
-    return response
+        
+        # Cycle Details
+        story.append(Paragraph("Cycle History", styles['Heading2']))
+        for cycle in data['cycles']:
+            header_text = (
+                f"Cycle: {cycle['start_date']} to {cycle['end_date']} | "
+                f"Length: {cycle['cycle_length']} days | "
+                f"Irregular: {'Yes' if cycle['is_irregular'] else 'No'}"
+            )
+            story.append(Paragraph(header_text, styles['Heading3']))
+            story.append(Spacer(1, 6))
+            
+            if cycle['symptoms']:
+                story.append(Paragraph("Symptoms:", styles['Heading4']))
+                for symptom in cycle['symptoms']:
+                    story.append(Paragraph(
+                        f"- {symptom['date']}: {symptom['symptom']}",
+                        styles['Normal']
+                    ))
+            
+            if cycle['moods']:
+                story.append(Paragraph("Moods:", styles['Heading4']))
+                for mood in cycle['moods']:
+                    story.append(Paragraph(
+                        f"- {mood['date']}: {mood['mood']}",
+                        styles['Normal']
+                    ))
+            
+            story.append(Spacer(1, 12))
+        
+        doc.build(story)
+        response = HttpResponse(buffer.getvalue(), content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="period_export_{user.username}.pdf"'
+        buffer.close()
+        return response
+    except Exception as e:
+        logger.error(f"PDF export error: {str(e)}")
+        return HttpResponse(
+            json.dumps({
+                "error": "PDF generation failed",
+                "message": str(e)
+            }),
+            content_type='application/json',
+            status=500
+        )
+
 
 #password reset 
 @swagger_auto_schema(
@@ -733,6 +798,7 @@ def request_password_reset(request):
         except CustomUser.DoesNotExist:
             return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 @swagger_auto_schema(
     method='post',
     operation_description="Verify password reset OTP",
@@ -1164,9 +1230,10 @@ def get_recommendations(request):
         
     except Exception as e:
         logger.error(f"Recommendation error for user {request.user.id}: {str(e)}", exc_info=True)
-        return Response(
-            {'error': 'Could not load recommendations', 'status': 'error'},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        return handle_error(
+            "Recommendation failed",
+            "Could not load recommendations",
+            status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
 @swagger_auto_schema(
@@ -1414,7 +1481,6 @@ def phase_prediction(request):
         user = request.user
         today = timezone.now().date()
         
-        # Get current cycle with prefetching
         current_cycle = Cycle.objects.filter(
             user=user,
             start_date__lte=today,
@@ -1432,22 +1498,18 @@ def phase_prediction(request):
                 'suggestion': 'Please log your period start date'
             }, status=status.HTTP_200_OK)
         
-        # Calculate current day of cycle
         current_day = (today - current_cycle.start_date).days + 1
         cycle_length = current_cycle.cycle_length or get_average_cycle_length(user) or 28
         
-        # Determine if cycle is irregular
         avg_length = get_average_cycle_length(user)
         is_irregular = (avg_length and abs(cycle_length - avg_length) > 5) or cycle_length > 35
         
-        # Phase calculation with adaptive logic
         phases = []
         
         if is_irregular:
-            # Adaptive phases for irregular cycles
-            menstrual_end = max(3, int(cycle_length * 0.15))  # At least 3 days
+            menstrual_end = max(3, int(cycle_length * 0.15))
             follicular_end = menstrual_end + max(5, int(cycle_length * 0.25))
-            ovulation_end = follicular_end + 3  # Fixed 3-day ovulation window
+            ovulation_end = follicular_end + 3
             phases = [
                 {'name': 'menstrual', 'start': 1, 'end': menstrual_end},
                 {'name': 'follicular', 'start': menstrual_end+1, 'end': follicular_end},
@@ -1455,7 +1517,6 @@ def phase_prediction(request):
                 {'name': 'luteal', 'start': ovulation_end+1, 'end': cycle_length}
             ]
         else:
-            # Standard phases for regular cycles
             phases = [
                 {'name': 'menstrual', 'start': 1, 'end': 5},
                 {'name': 'follicular', 'start': 6, 'end': 13},
@@ -1463,7 +1524,6 @@ def phase_prediction(request):
                 {'name': 'luteal', 'start': 17, 'end': cycle_length}
             ]
         
-        # Find current and next phase
         current_phase = next_phase = None
         days_until_next = 0
         
@@ -1474,13 +1534,11 @@ def phase_prediction(request):
                 days_until_next = phase['end'] - current_day + 1
                 break
         
-        # Handle case where current day exceeds cycle length
         if current_day > cycle_length:
             current_phase = 'awaiting menstruation'
             next_phase = 'menstrual'
-            days_until_next = None  # Can't predict
+            days_until_next = None
             
-        # Get today's symptoms and moods
         daily_log = DailyLog.objects.filter(
             user=user,
             date=today
@@ -1502,10 +1560,11 @@ def phase_prediction(request):
     
     except Exception as e:
         logger.error(f"Phase prediction error: {str(e)}")
-        return Response({
-            'error': 'Could not calculate phase prediction',
-            'details': str(e)
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return handle_error(
+            "Prediction failed",
+            "Could not calculate phase prediction",
+            status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
         
 @swagger_auto_schema(
     method='post',
@@ -1577,6 +1636,7 @@ def log_daily_status(request):
         )
     }
 )
+
 @api_view(['GET'])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
