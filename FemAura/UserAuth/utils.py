@@ -2,6 +2,10 @@ from datetime import date, timedelta
 from .models import Symptom, Mood, ContentRecommendation, Cycle,DailyLog, DailySymptom, DailyMood
 from django.utils import timezone
 from django.db.models import Count, Case, When, IntegerField, Q, F
+import logging
+from django.db import IntegrityError
+
+logger = logging.getLogger(__name__)
 
 def get_average_cycle_length(user):
     """
@@ -235,57 +239,88 @@ def get_period_history(user):
     """
     Returns comprehensive period history with analysis and recommendations.
     Now excludes single-day cycles from calculations.
+    
+    Args:
+        user: User model instance (not request object)
+    
+    Returns:
+        dict: Contains cycle history and analysis
+        None: If no cycles exist
     """
-    cycles = Cycle.objects.filter(
-        user=user,
-        start_date__lt=F('end_date')  # Only multi-day cycles
-    ).order_by('start_date')
+    try:
+        if not hasattr(user, 'id'):
+            raise ValueError("Expected User object but got something else")
+            
+        # Get multi-day cycles only
+        cycles = Cycle.objects.filter(
+            user_id=user.id,  # Explicitly use user.id
+            start_date__lt=F('end_date')  # Only multi-day cycles
+        ).order_by('start_date')
 
-    if not cycles.exists():
-        return None
+        if not cycles.exists():
+            return None
 
-    lengths = [c.cycle_length for c in cycles if c.cycle_length]
-    avg_length = sum(lengths) / len(lengths) if lengths else 0
-    variability = max(lengths) - min(lengths) if len(lengths) > 1 else 0
-    is_irregular = avg_length > 35 or variability > 7
-    
-    # Get health insights from daily logs
-    common_symptoms = (
-        DailySymptom.objects.filter(daily_log__user=user)
-        .values('symptom')
-        .annotate(count=Count('id'))
-        .order_by('-count')[:3]
-    )
-    
-    common_moods = (
-        DailyMood.objects.filter(daily_log__user=user)
-        .values('mood')
-        .annotate(count=Count('id'))
-        .order_by('-count')[:3]
-    )
+        # Calculate cycle statistics
+        lengths = [c.cycle_length for c in cycles if c.cycle_length is not None]
+        
+        if not lengths:
+            avg_length = 0
+            variability = 0
+        else:
+            avg_length = round(sum(lengths) / len(lengths), 1)
+            variability = max(lengths) - min(lengths) if len(lengths) > 1 else 0
+        
+        is_irregular = avg_length > 35 or variability > 7
+        
+        # Get health insights from daily logs
+        common_symptoms = (
+            DailySymptom.objects.filter(daily_log__user=user)
+            .values('symptom')
+            .annotate(count=Count('id'))
+            .order_by('-count')[:3]
+        )
+        
+        common_moods = (
+            DailyMood.objects.filter(daily_log__user=user)
+            .values('mood')
+            .annotate(count=Count('id'))
+            .order_by('-count')[:3]
+        )
 
-    return {
-        'avg_cycle_length': avg_length,
-        'cycle_variability': variability,
-        'irregularity_level': get_irregularity_level(variability, avg_length),
-        'total_cycles': len(cycles),
-        'common_symptoms': [s['symptom'] for s in common_symptoms],
-        'common_moods': [m['mood'] for m in common_moods],
-        'period_history': [
-            {
-                'start_date': c.start_date,
-                'end_date': c.end_date,
-                'days': c.cycle_length,
-                'symptoms': list(
-                    DailySymptom.objects.filter(
-                        daily_log__cycle=c
-                    ).values_list('symptom', flat=True).distinct()
-                ),
-                'is_irregular': c.cycle_length > 35 if c.cycle_length else False
-            } for c in cycles
-        ],
-        'health_recommendations': get_health_recommendations(cycles, avg_length, variability)
-    }
+        # Prepare response data
+        history_data = []
+        for cycle in cycles:
+            try:
+                cycle_length = (cycle.end_date - cycle.start_date).days + 1
+                history_data.append({
+                    'start_date': cycle.start_date,
+                    'end_date': cycle.end_date,
+                    'days': cycle_length,
+                    'symptoms': list(
+                        DailySymptom.objects.filter(
+                            daily_log__cycle=cycle
+                        ).values_list('symptom', flat=True).distinct()
+                    ),
+                    'is_irregular': cycle_length > 35
+                })
+            except Exception as e:
+                logger.error(f"Error processing cycle {cycle.id}: {str(e)}")
+                continue
+
+        return {
+            'avg_cycle_length': avg_length,
+            'cycle_variability': variability,
+            'is_irregular': is_irregular,
+            'total_cycles': cycles.count(),
+            'common_symptoms': [s['symptom'] for s in common_symptoms],
+            'common_moods': [m['mood'] for m in common_moods],
+            'period_history': history_data,
+        }
+
+    except Exception as e:
+        logger.error(f"Error in get_period_history: {str(e)}")
+        raise  # Re-raise to handle in view
+
 
 def get_irregularity_level(variability, avg_length):
     """Classify cycle irregularity"""

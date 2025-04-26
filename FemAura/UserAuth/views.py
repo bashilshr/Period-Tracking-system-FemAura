@@ -412,54 +412,102 @@ def log_cycle(request):
             status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-@swagger_auto_schema(
-    method='get',
-    operation_description="Predict cycle-related information for the authenticated user.",
-    responses={
-        200: openapi.Response(
-            description="Cycle information predicted successfully",
-            schema=openapi.Schema(
-                type=openapi.TYPE_OBJECT,
-                properties={
-                    'avg_cycle_length': openapi.Schema(type=openapi.TYPE_INTEGER),
-                    'current_day': openapi.Schema(type=openapi.TYPE_INTEGER),
-                    'ovulation_status': openapi.Schema(type=openapi.TYPE_STRING),
-                    'phase': openapi.Schema(
-                        type=openapi.TYPE_OBJECT,
-                        properties={
-                            'title': openapi.Schema(type=openapi.TYPE_STRING),
-                            'symptoms': openapi.Schema(type=openapi.TYPE_ARRAY, items=openapi.Items(type=openapi.TYPE_STRING)),
-                        },
-                    ),
-                },
-            ),
-        ),
-        400: openapi.Response('Invalid input data'),
-    }
-)
 @api_view(['GET'])
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def predict_cycle(request):
+    """Improved cycle prediction with biological validation"""
     try:
         user = request.user
-        avg_cycle_length = get_average_cycle_length(user)
-        current_day = get_current_day(user)
-        ovulation_status = get_ovulation_status(user)
-        phase = get_phase(user)
-
-        return Response({
+        today = timezone.now().date()
+        
+        # Get cycles ordered by recency
+        cycles = Cycle.objects.filter(user=user).order_by('-start_date')
+        if not cycles.exists():
+            return Response({
+                'message': 'No cycle data available',
+                'suggestion': 'Log your first period to enable predictions'
+            }, status=status.HTTP_200_OK)
+        
+        latest_cycle = cycles.first()
+        
+        # Validate and calculate cycle length (enforce biological limits)
+        cycle_durations = [
+            max(21, min(45, (c.end_date - c.start_date).days + 1))  # Enforce 21-45 day range
+            for c in cycles if c.end_date and c.start_date
+        ]
+        
+        avg_cycle_length = round(sum(cycle_durations) / len(cycle_durations)) if cycle_durations else 28
+        current_day = (today - latest_cycle.start_date).days + 1
+        
+        # Phase calculation with validated ranges
+        phases = [
+            {'name': 'menstrual', 'start': 1, 'end': min(7, avg_cycle_length//4)},  # Max 7 days
+            {'name': 'follicular', 'start': 8, 'end': max(8, min(avg_cycle_length-14, 21))},
+            {'name': 'ovulation', 'start': max(9, avg_cycle_length-16), 'end': avg_cycle_length-14},
+            {'name': 'luteal', 'start': avg_cycle_length-13, 'end': avg_cycle_length}
+        ]
+        
+        current_phase = next_phase = None
+        days_until_next = 0
+        
+        for i, phase in enumerate(phases):
+            if phase['start'] <= current_day <= phase['end']:
+                current_phase = f"{phase['name'].title()} Phase"
+                next_idx = (i + 1) % len(phases)
+                next_phase = f"{phases[next_idx]['name'].title()} Phase"
+                days_until_next = phase['end'] - current_day + 1
+                break
+        
+        # Ovulation calculation (more accurate)
+        ovulation_day = max(10, min(avg_cycle_length-14, 20))  # Constrained to day 10-20
+        if current_day == ovulation_day:
+            ovulation_status = "Ovulating today"
+        elif current_day > ovulation_day:
+            ovulation_status = f"Ovulated {current_day - ovulation_day} days ago"
+        else:
+            ovulation_status = f"{ovulation_day - current_day} days until ovulation"
+        
+        # Next period prediction
+        next_period_start = latest_cycle.start_date + timedelta(days=avg_cycle_length)
+        days_until_period = (next_period_start - today).days
+        
+        # Fertility window (6 day window centered on ovulation)
+        fertility_start = latest_cycle.start_date + timedelta(days=max(1, ovulation_day-5))
+        fertility_end = latest_cycle.start_date + timedelta(days=min(avg_cycle_length, ovulation_day+1))
+        
+        # Build response
+        response_data = {
             'avg_cycle_length': avg_cycle_length,
             'current_day': current_day,
-            'ovulation_status': ovulation_status,
-            'phase': phase,
-        }, status=status.HTTP_200_OK)
+            'current_phase': current_phase,
+            'next_phase': next_phase,
+            'days_until_next_phase': days_until_next,
+            'next_period_date': next_period_start.isoformat(),
+            'days_until_next_period': max(0, days_until_period),
+            'fertility_window': {
+                'start': fertility_start.isoformat(),
+                'end': fertility_end.isoformat(),
+                'peak_day': (latest_cycle.start_date + timedelta(days=ovulation_day)).isoformat()
+            },
+            'is_irregular': avg_cycle_length < 24 or avg_cycle_length > 35,
+            'last_period_date': latest_cycle.start_date.isoformat(),
+            'cycle_progress': min(99, max(1, (current_day / avg_cycle_length) * 100)),
+            'biological_notes': "Normal cycles range 24-35 days" if avg_cycle_length >=24 and avg_cycle_length <=35 
+                              else "Consider consulting a healthcare provider about irregular cycles"
+        }
+        
+        return Response(response_data, status=status.HTTP_200_OK)
+        
     except Exception as e:
-        logger.error(f"Cycle prediction error: {str(e)}")
-        return handle_error(
-            "Prediction failed",
-            "Could not predict cycle information",
-            status.HTTP_400_BAD_REQUEST
+        logger.error(f"Prediction error for user {request.user.id}: {str(e)}")
+        return Response(
+            {
+                'error': 'prediction_error',
+                'message': 'Could not calculate cycle prediction',
+                'resolution': 'Please ensure you have logged at least one complete menstrual cycle'
+            },
+            status=status.HTTP_400_BAD_REQUEST
         )
 
 @swagger_auto_schema(
@@ -495,26 +543,24 @@ def predict_cycle(request):
 @authentication_classes([JWTAuthentication])
 @permission_classes([IsAuthenticated])
 def period_history(request):
-    """
-    Fetch period history for the authenticated user.
-
-    Returns:
-    - avg_cycle_length: Average length of the user's menstrual cycles.
-    - total_cycles: Total number of cycles recorded.
-    - period_history: List of cycles with start date, end date, and cycle length.
-    """
     try:
-        user = request.user
-        history = get_period_history(user)
-
-        if not history:
-            return Response({'error': 'No cycle data found'}, status=status.HTTP_404_NOT_FOUND)
-
+        # Pass the user object, not the request
+        history = get_period_history(request.user)
+        
+        if history is None:
+            return Response({
+                'message': 'No cycle data found',
+                'suggestion': 'Please log your first period to start tracking'
+            }, status=status.HTTP_200_OK)
+            
         return Response(history, status=status.HTTP_200_OK)
+        
     except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    
-  
+        return Response({
+            'error': 'history_retrieval_failed',
+            'message': str(e)
+        }, status=status.HTTP_400_BAD_REQUEST)
+        
 @swagger_auto_schema(
     method='get',
     operation_description="Export complete menstrual cycle history including moods, symptoms, and irregularity data",
@@ -552,45 +598,74 @@ def export_user_data(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
-    # Get all data without date filtering
-    all_cycles = Cycle.objects.filter(user=request.user).order_by('start_date')
-    irregular_cycles = [
-        cycle for cycle in all_cycles 
-        if cycle.cycle_length and cycle.cycle_length > 28
-    ]
+    try:
+        # Get all data without date filtering
+        all_cycles = Cycle.objects.filter(user=request.user).order_by('start_date')
+        irregular_cycles = [
+            cycle for cycle in all_cycles 
+            if cycle.cycle_length and cycle.cycle_length > 28
+        ]
 
-    # Build export structure
-    export_data = {
-        'summary': {
-            'total_cycles': all_cycles.count(),
-            'irregular_count': len(irregular_cycles),
-            'irregular_dates': [
-                {'start_date': cycle.start_date, 'end_date': cycle.end_date} 
-                for cycle in irregular_cycles
-            ],
-            'first_record': all_cycles.first().start_date if all_cycles.exists() else None,
-            'last_record': all_cycles.last().start_date if all_cycles.exists() else None
-        },
-        'cycles': []
-    }
+        # Build export structure
+        export_data = {
+            'summary': {
+                'total_cycles': all_cycles.count(),
+                'irregular_count': len(irregular_cycles),
+                'irregular_dates': [
+                    {'start_date': cycle.start_date, 'end_date': cycle.end_date} 
+                    for cycle in irregular_cycles
+                ],
+                'first_record': all_cycles.first().start_date if all_cycles.exists() else None,
+                'last_record': all_cycles.last().start_date if all_cycles.exists() else None
+            },
+            'cycles': []
+        }
 
-    for cycle in all_cycles:
-        export_data['cycles'].append({
-            'start_date': cycle.start_date,
-            'end_date': cycle.end_date,
-            'cycle_length': cycle.cycle_length,
-            'is_irregular': cycle.cycle_length > 28 if cycle.cycle_length else False,
-            'symptoms': list(Symptom.objects.filter(cycle=cycle).values('date', 'symptom')),
-            'moods': list(Mood.objects.filter(cycle=cycle).values('date', 'mood'))
-        })
+        for cycle in all_cycles:
+            # Get symptoms through DailyLog -> DailySymptom
+            symptoms = []
+            daily_logs = DailyLog.objects.filter(cycle=cycle).prefetch_related('symptoms')
+            for log in daily_logs:
+                symptoms.extend([{
+                    'date': log.date,
+                    'symptom': s.symptom
+                } for s in log.symptoms.all()])
+            
+            # Get moods through DailyLog -> DailyMood
+            moods = []
+            daily_logs = DailyLog.objects.filter(cycle=cycle).prefetch_related('moods')
+            for log in daily_logs:
+                moods.extend([{
+                    'date': log.date,
+                    'mood': m.mood
+                } for m in log.moods.all()])
+            
+            export_data['cycles'].append({
+                'start_date': cycle.start_date,
+                'end_date': cycle.end_date,
+                'cycle_length': cycle.cycle_length,
+                'is_irregular': cycle.cycle_length > 28 if cycle.cycle_length else False,
+                'symptoms': symptoms,
+                'moods': moods
+            })
 
-    if format_type == 'csv':
-        return export_to_csv(export_data)
-    elif format_type == 'json':
-        return export_to_json(export_data)
-    elif format_type == 'pdf':
-        return export_to_pdf(export_data, request.user)
-    
+        if format_type == 'csv':
+            return export_to_csv(export_data)
+        elif format_type == 'json':
+            return export_to_json(export_data)
+        elif format_type == 'pdf':
+            return export_to_pdf(export_data, request.user)
+            
+    except Exception as e:
+        logger.error(f"Export error: {str(e)}")
+        return Response(
+            {
+                'error': 'export_failed',
+                'message': 'Could not generate export data'
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
 def export_to_csv(data):
     try:
         response = HttpResponse(content_type='text/csv')
@@ -601,21 +676,25 @@ def export_to_csv(data):
         # Summary Section
         writer.writerow(['Total Cycles', data['summary']['total_cycles']])
         writer.writerow(['Irregular Cycles', data['summary']['irregular_count']])
-        writer.writerow([])
         
         if data['summary']['irregular_dates']:
+            writer.writerow([])
             writer.writerow(['Irregular Cycle Dates'])
             for irregular in data['summary']['irregular_dates']:
                 writer.writerow([f"{irregular['start_date']} to {irregular['end_date']}"])
-            writer.writerow([])
+        
+        writer.writerow([])
+        writer.writerow(['First Record', data['summary']['first_record']])
+        writer.writerow(['Last Record', data['summary']['last_record']])
+        writer.writerow([])
         
         # Cycle Details
         writer.writerow(['Cycle Details'])
         writer.writerow(['Start Date', 'End Date', 'Length', 'Irregular?', 'Symptoms', 'Moods'])
         
         for cycle in data['cycles']:
-            symptoms = "; ".join(f"{s['date']}: {s['symptom']}" for s in cycle['symptoms'])
-            moods = "; ".join(f"{m['date']}: {m['mood']}" for m in cycle['moods'])
+            symptoms = "; ".join(f"{s['date']}: {s['symptom']}" for s in cycle['symptoms']) if cycle['symptoms'] else "None"
+            moods = "; ".join(f"{m['date']}: {m['mood']}" for m in cycle['moods']) if cycle['moods'] else "None"
             
             writer.writerow([
                 cycle['start_date'],
@@ -630,10 +709,7 @@ def export_to_csv(data):
     except Exception as e:
         logger.error(f"CSV export error: {str(e)}")
         return HttpResponse(
-            json.dumps({
-                "error": "CSV generation failed",
-                "message": str(e)
-            }),
+            json.dumps({"error": "CSV generation failed", "message": str(e)}),
             content_type='application/json',
             status=500
         )
@@ -657,7 +733,7 @@ def export_to_json(data):
             status=500
         )
 
-def export_to_pdf(data, user):
+def export_to_pdf(data, username):
     try:
         buffer = BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=letter)
@@ -665,13 +741,15 @@ def export_to_pdf(data, user):
         story = []
         
         # Title
-        story.append(Paragraph("Period Data Export", styles['Title']))
+        story.append(Paragraph(f"Period Data Export for {username}", styles['Title']))
         story.append(Spacer(1, 12))
         
         # Summary Section
         story.append(Paragraph("Summary", styles['Heading2']))
         story.append(Paragraph(f"Total Cycles: {data['summary']['total_cycles']}", styles['Normal']))
         story.append(Paragraph(f"Irregular Cycles: {data['summary']['irregular_count']}", styles['Normal']))
+        story.append(Paragraph(f"First Record: {data['summary']['first_record']}", styles['Normal']))
+        story.append(Paragraph(f"Last Record: {data['summary']['last_record']}", styles['Normal']))
         
         if data['summary']['irregular_dates']:
             story.append(Spacer(1, 6))
@@ -687,12 +765,12 @@ def export_to_pdf(data, user):
         # Cycle Details
         story.append(Paragraph("Cycle History", styles['Heading2']))
         for cycle in data['cycles']:
-            header_text = (
+            story.append(Paragraph(
                 f"Cycle: {cycle['start_date']} to {cycle['end_date']} | "
                 f"Length: {cycle['cycle_length']} days | "
-                f"Irregular: {'Yes' if cycle['is_irregular'] else 'No'}"
-            )
-            story.append(Paragraph(header_text, styles['Heading3']))
+                f"Irregular: {'Yes' if cycle['is_irregular'] else 'No'}",
+                styles['Heading3']
+            ))
             story.append(Spacer(1, 6))
             
             if cycle['symptoms']:
@@ -702,6 +780,8 @@ def export_to_pdf(data, user):
                         f"- {symptom['date']}: {symptom['symptom']}",
                         styles['Normal']
                     ))
+            else:
+                story.append(Paragraph("No symptoms recorded", styles['Normal']))
             
             if cycle['moods']:
                 story.append(Paragraph("Moods:", styles['Heading4']))
@@ -710,25 +790,23 @@ def export_to_pdf(data, user):
                         f"- {mood['date']}: {mood['mood']}",
                         styles['Normal']
                     ))
+            else:
+                story.append(Paragraph("No moods recorded", styles['Normal']))
             
             story.append(Spacer(1, 12))
         
         doc.build(story)
         response = HttpResponse(buffer.getvalue(), content_type='application/pdf')
-        response['Content-Disposition'] = f'attachment; filename="period_export_{user.username}.pdf"'
+        response['Content-Disposition'] = f'attachment; filename="period_export_{username}.pdf"'
         buffer.close()
         return response
     except Exception as e:
         logger.error(f"PDF export error: {str(e)}")
         return HttpResponse(
-            json.dumps({
-                "error": "PDF generation failed",
-                "message": str(e)
-            }),
+            json.dumps({"error": "PDF generation failed", "message": str(e)}),
             content_type='application/json',
             status=500
         )
-
 
 #password reset 
 @swagger_auto_schema(
@@ -1678,3 +1756,97 @@ def get_todays_status(request):
             'error': str(e),
             'status': 'error'
         }, status=status.HTTP_400_BAD_REQUEST)
+
+@swagger_auto_schema(
+    method='get',
+    operation_description="Get cycle history data for visualization",
+    responses={
+        200: openapi.Response(
+            description="Cycle history graph data",
+            schema=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'labels': openapi.Schema(
+                        type=openapi.TYPE_ARRAY,
+                        items=openapi.Items(type=openapi.TYPE_STRING),
+                        description="Cycle numbers or dates for x-axis"
+                    ),
+                    'cycle_lengths': openapi.Schema(
+                        type=openapi.TYPE_ARRAY,
+                        items=openapi.Items(type=openapi.TYPE_INTEGER),
+                        description="Cycle lengths in days"
+                    ),
+                    'period_lengths': openapi.Schema(
+                        type=openapi.TYPE_ARRAY,
+                        items=openapi.Items(type=openapi.TYPE_INTEGER),
+                        description="Period durations in days"
+                    ),
+                    'average_cycle': openapi.Schema(
+                        type=openapi.TYPE_NUMBER,
+                        description="Average cycle length"
+                    ),
+                    'average_period': openapi.Schema(
+                        type=openapi.TYPE_NUMBER,
+                        description="Average period duration"
+                    )
+                }
+            )
+        ),
+        404: "No cycle data found"
+    }
+)
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def cycle_history_graph(request):
+    """
+    Get cycle history data formatted for frontend visualization
+    Returns data in format suitable for charts (Chart.js, etc.)
+    """
+    try:
+        user = request.user
+        cycles = Cycle.objects.filter(user=user).order_by('start_date')
+        
+        if not cycles.exists():
+            return Response(
+                {'message': 'No cycle data available for visualization'},
+                status=status.HTTP_200_OK
+            )
+
+        # Prepare data
+        labels = []
+        cycle_lengths = []
+        period_lengths = []
+        
+        for i, cycle in enumerate(cycles):
+            labels.append(f"Cycle {i+1} ({cycle.start_date.strftime('%b %Y')})")
+            cycle_length = cycle.cycle_length or (cycle.end_date - cycle.start_date).days + 1
+            period_length = (cycle.end_date - cycle.start_date).days + 1
+            
+            cycle_lengths.append(cycle_length)
+            period_lengths.append(period_length)
+
+        # Calculate averages
+        avg_cycle = sum(cycle_lengths) / len(cycle_lengths)
+        avg_period = sum(period_lengths) / len(period_lengths)
+
+        response_data = {
+            'labels': labels,
+            'cycle_lengths': cycle_lengths,
+            'period_lengths': period_lengths,
+            'average_cycle': round(avg_cycle, 1),
+            'average_period': round(avg_period, 1),
+            'chart_type': 'bar',  # Can be used by frontend to determine chart type
+            'chart_title': 'Your Cycle History',
+            'cycle_unit': 'days',
+            'last_updated': timezone.now().isoformat()
+        }
+
+        return Response(response_data, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        logger.error(f"Cycle graph error: {str(e)}")
+        return Response(
+            {'error': 'Could not generate cycle history data'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )

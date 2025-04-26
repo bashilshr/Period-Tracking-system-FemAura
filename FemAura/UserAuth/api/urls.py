@@ -7,7 +7,7 @@ urlpatterns = [
    path('login/', views.login_user, name='Login'),
    path('logout/',views.logout_user,name='Logout'),
    path('predict-cycle/', views.predict_cycle, name='predict_cycle'),
-   path('get-period-history/', views.get_period_history, name='get_period_history'),
+   path('get-period-history/', views.period_history, name='get_period_history'),
    path('log/log-previous/', views.log_cycle, name='log previous period'),
    path('export-data/', views.export_user_data, name='export-data'),
    path('request-password-reset/', views.request_password_reset, name='request_password_reset'),
@@ -23,4 +23,5 @@ urlpatterns = [
     path('phase-prediction/', views.phase_prediction, name='phase_prediction'),
     path('log/daily-log-status/', views.log_daily_status, name='log_daily_status'),
     path('log/get_todays_status/', views.get_todays_status, name='todays_log_status'),
+    path('graph/history-graph/', views.cycle_history_graph, name='cycle_history_graph'),
 ]
