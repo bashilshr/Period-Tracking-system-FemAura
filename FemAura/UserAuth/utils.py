@@ -1,5 +1,7 @@
 from datetime import date, timedelta
-from .models import Cycle
+from .models import Symptom, Mood, ContentRecommendation, Cycle,DailyLog, DailySymptom, DailyMood
+from django.utils import timezone
+from django.db.models import Count, Case, When, IntegerField, Q, F
 
 def get_average_cycle_length(user):
     """
@@ -58,13 +60,26 @@ def get_ovulation_status(user):
     # Highly irregular classification
     if variability > 15 or any(l > 45 for l in lengths):
         return "Highly irregular cycle detected - predictions may be inaccurate"
+    
+def get_cycle_day(user, date=None):
+    """Calculate day of current cycle"""
+    date = date or timezone.now().date()
+    cycle = get_current_cycle(user, date)
+    
+    if not cycle:
+        return None
+        
+    return (date - cycle.start_date).days + 1
 
-def get_phase(user):
+def get_phase(user,date = None):
     """
     Determine the current menstrual phase with adaptive logic for irregular cycles.
     Returns phase information including title, symptoms, and recommendations.
     """
+    date = date or timezone.now().date()
+    cycle = get_current_cycle(user, date)
     cycles = Cycle.objects.filter(user=user).order_by('-start_date')
+
     if not cycles.exists():
         return {
             'title': 'No data',
@@ -74,15 +89,23 @@ def get_phase(user):
             'confidence': 'none'
         }
 
-    current_cycle = cycles.first()
     current_day = get_current_day(user)
     avg_cycle_length = get_average_cycle_length(user)
     
+    daily_log = DailyLog.objects.filter(user=user, date=date).first()
+    if daily_log:
+        todays_symptoms = list(daily_log.symptoms.values_list('symptom', flat=True))
+        todays_moods = list(daily_log.moods.values_list('mood', flat=True))
+    else:
+        todays_symptoms = []
+        todays_moods = []
+
     # Default values
     phase_title = "Unknown Phase"
     symptoms = []
     recommendations = []
     is_irregular = avg_cycle_length > 35 or len(cycles) < 3
+
     
     # For irregular cycles, use relative percentages
     if is_irregular:
@@ -198,10 +221,11 @@ def get_phase(user):
                 'Practice relaxation techniques',
                 'Track PMS symptoms'
             ]
-
+    all_symptoms = list(set(todays_symptoms + symptoms))
     return {
         'title': phase_title,
-        'symptoms': symptoms,
+        'symptoms': all_symptoms,
+        "Moods": todays_moods,
         'recommendations': recommendations,
         'is_irregular': is_irregular,
         'confidence': 'high' if not is_irregular else 'medium'
@@ -209,9 +233,14 @@ def get_phase(user):
 
 def get_period_history(user):
     """
-    Returns comprehensive period history with analysis and recommendations
+    Returns comprehensive period history with analysis and recommendations.
+    Now excludes single-day cycles from calculations.
     """
-    cycles = Cycle.objects.filter(user=user).order_by('start_date')
+    cycles = Cycle.objects.filter(
+        user=user,
+        start_date__lt=F('end_date')  # Only multi-day cycles
+    ).order_by('start_date')
+
     if not cycles.exists():
         return None
 
@@ -220,22 +249,91 @@ def get_period_history(user):
     variability = max(lengths) - min(lengths) if len(lengths) > 1 else 0
     is_irregular = avg_length > 35 or variability > 7
     
+    # Get health insights from daily logs
+    common_symptoms = (
+        DailySymptom.objects.filter(daily_log__user=user)
+        .values('symptom')
+        .annotate(count=Count('id'))
+        .order_by('-count')[:3]
+    )
+    
+    common_moods = (
+        DailyMood.objects.filter(daily_log__user=user)
+        .values('mood')
+        .annotate(count=Count('id'))
+        .order_by('-count')[:3]
+    )
+
     return {
         'avg_cycle_length': avg_length,
         'cycle_variability': variability,
         'irregularity_level': get_irregularity_level(variability, avg_length),
         'total_cycles': len(cycles),
+        'common_symptoms': [s['symptom'] for s in common_symptoms],
+        'common_moods': [m['mood'] for m in common_moods],
         'period_history': [
             {
                 'start_date': c.start_date,
                 'end_date': c.end_date,
-                'cycle_length': c.cycle_length,
-                'is_irregular': c.cycle_length > 35 if c.cycle_length else False,
-                'notes': get_cycle_notes(c, avg_length)  # Now properly defined
+                'days': c.cycle_length,
+                'symptoms': list(
+                    DailySymptom.objects.filter(
+                        daily_log__cycle=c
+                    ).values_list('symptom', flat=True).distinct()
+                ),
+                'is_irregular': c.cycle_length > 35 if c.cycle_length else False
             } for c in cycles
         ],
         'health_recommendations': get_health_recommendations(cycles, avg_length, variability)
     }
+
+def get_irregularity_level(variability, avg_length):
+    """Classify cycle irregularity"""
+    if avg_length == 0:
+        return 'unknown'
+    if variability > 15 or avg_length > 35:
+        return 'high'
+    if variability > 7:
+        return 'moderate'
+    return 'low'
+
+def get_health_recommendations(cycles, avg_length, variability):
+    """Generate personalized health recommendations"""
+    recommendations = []
+    
+    if not cycles:
+        return ["Track more cycles for personalized recommendations"]
+    
+    if avg_length > 35:
+        recommendations.append("Your average cycle is longer than typical")
+        recommendations.append("Consider discussing with a healthcare provider")
+    
+    if variability > 7:
+        recommendations.append(f"Your cycle length varies by {variability} days")
+        if variability > 14:
+            recommendations.append("Significant variation - medical consultation recommended")
+    
+    # Add recommendations based on daily logs
+    frequent_symptoms = (
+        DailySymptom.objects.filter(daily_log__user=cycles[0].user)
+        .values('symptom')
+        .annotate(count=Count('id'))
+        .filter(count__gte=3)
+    )
+    
+    for symptom in frequent_symptoms:
+        rec = {
+            'cramps': "Consider magnesium supplements for frequent cramps",
+            'headache': "Stay hydrated and monitor caffeine intake for headaches",
+            'bloating': "Reduce salt and processed foods to minimize bloating"
+        }.get(symptom['symptom'].lower())
+        if rec:
+            recommendations.append(rec)
+    
+    return recommendations or [
+        "Maintain a balanced diet rich in iron and vitamins",
+        "Track symptoms to identify patterns"
+    ]
 
 def get_cycle_notes(cycle, avg_length):
     """
@@ -266,76 +364,193 @@ def get_cycle_notes(cycle, avg_length):
     
     return notes if notes else ["Normal cycle characteristics"]
 
-def get_health_recommendations(cycles, avg_length, variability):
-    """
-    Generate personalized health recommendations based on cycle history
-    """
-    recommendations = []
-    lengths = [c.cycle_length for c in cycles if c.cycle_length]
-    
-    if not lengths:
-        return ["Track more cycles for personalized recommendations"]
-    
-    # Irregularity recommendations
-    if avg_length > 35:
-        recommendations.append("Your average cycle is longer than typical")
-        recommendations.append("Consider discussing with a healthcare provider")
-    
-    if variability > 7:
-        recommendations.append(f"Your cycle length varies by {variability} days")
-        if variability > 14:
-            recommendations.append("Significant variation - medical consultation recommended")
-    
-    # General health tips
-    recommendations.append("Maintain a balanced diet rich in iron and vitamins")
-    recommendations.append("Track symptoms to identify patterns")
-    
-    # Add specific recommendations based on cycle characteristics
-    if any(c.cycle_length and c.cycle_length < 21 for c in cycles):
-        recommendations.append("Short cycles may indicate hormonal imbalances")
-    
-    if len(cycles) < 6:
-        recommendations.append("Tracking more cycles will improve predictions")
-    
-    return recommendations
 
-def get_irregularity_level(variability, avg_length):
-    """
-    Classify cycle irregularity into levels
-    """
-    if avg_length == 0:
-        return 'unknown'
-    if variability > 14 or avg_length > 40:
-        return 'high'
-    if variability > 7 or avg_length > 35:
-        return 'moderate'
-    return 'low'
 
-def get_irregularity_level(variability, avg_length):
-    if avg_length == 0:
-        return 'unknown'
-    if variability > 15 or avg_length > 35:
-        return 'high'
-    if variability > 7:
-        return 'moderate'
-    return 'low'
+# This code is a utility module for a Django application that deals with menstrual cycle tracking and health recommendations.
+def get_personalized_recommendations(user):
+    try:
+        today = timezone.now().date()
+        phase_info = get_phase(user)
+        current_phase = phase_info['title'].lower()
+        is_irregular = phase_info['is_irregular']
+        
+        # ===== NEW: Get today's data from DailyLog =====
+        daily_log = DailyLog.objects.filter(user=user, date=today).first()
+        
+        # Get symptoms (from daily log or fallback to recent)
+        if daily_log:
+            todays_symptoms = list(daily_log.dailysymptom_set.values_list('symptom', flat=True))
+            todays_moods = list(daily_log.dailymood_set.values_list('mood', flat=True))
+        else:
+            # Fallback to recent symptoms/moods if no daily log
+            todays_symptoms = Symptom.objects.filter(
+                cycle__user=user,
+                date__gte=today-timedelta(days=7)
+            ).values_list('symptom', flat=True).distinct()
+            
+            todays_moods = Mood.objects.filter(
+                cycle__user=user,
+                date__gte=today-timedelta(days=7)
+            ).values_list('mood', flat=True).distinct()
 
-def get_health_recommendations(cycles, avg_length, variability):
-    lengths = [c.cycle_length for c in cycles if c.cycle_length]
-    if not lengths:
-        return []
+        # Base query - phase matching first
+        recommendations = ContentRecommendation.objects.filter(
+            phase=current_phase.split()[0],
+            is_active=True
+        )
+
+        # ===== IMPROVEMENT 1: Group symptom recommendations =====
+        symptom_groups = {}
+        for symptom in todays_symptoms:
+            best_match = recommendations.filter(
+                symptom=symptom
+            ).order_by('?').first()
+            if best_match:
+                symptom_groups[symptom] = best_match
+        symptom_recs = list(symptom_groups.values())
+
+        # ===== IMPROVEMENT 2: Enhanced mood matching =====
+        mood_recs = []
+        mood_content_map = {
+            'stressed': ['stress', 'relax', 'calm'],
+            'anxious': ['anxiety', 'peace', 'mindful'],
+            'happy': ['energy', 'joy', 'vitality'],
+            'tired': ['energy boost', 'fatigue relief'],
+            'irritable': ['calm', 'patience', 'mood balance']
+        }
+        
+        for mood in todays_moods:
+            mood_query = Q()
+            for keyword in mood_content_map.get(mood.lower(), []):
+                mood_query |= Q(title__icontains=keyword) | Q(description__icontains=keyword)
+            
+            best_mood_match = recommendations.filter(mood_query)\
+                                           .exclude(id__in=[r.id for r in symptom_recs])\
+                                           .order_by('?').first()
+            if best_mood_match:
+                mood_recs.append(best_mood_match)
+
+        # ===== IMPROVEMENT 3: Content diversity =====
+        content_types = {
+            'educational': ['guide', 'explainer', 'science'],
+            'actionable': ['exercise', 'recipe', 'practice'],
+            'supportive': ['meditation', 'self-care', 'tips']
+        }
+        
+        diverse_recs = []
+        for content_type, keywords in content_types.items():
+            type_query = Q()
+            for keyword in keywords:
+                type_query |= Q(description__icontains=keyword)
+            match = recommendations.filter(type_query)\
+                                 .exclude(id__in=[r.id for r in symptom_recs + mood_recs])\
+                                 .order_by('?').first()
+            if match:
+                diverse_recs.append(match)
+
+        # ===== IMPROVEMENT 4: View history consideration =====
+        fresh_content = recommendations.annotate(
+            viewed_count=Count(
+                Case(
+                    When(user_interactions__user=user, then=1),
+                    output_field=IntegerField()
+                )
+            )
+        ).order_by('viewed_count')[:2]
+
+        # ===== NEW: Irregular cycle specific content =====
+        irregular_recs = []
+        if is_irregular:
+            irregular_recs = recommendations.filter(
+                Q(title__icontains='irregular') | 
+                Q(description__icontains='irregular')
+            ).exclude(id__in=[r.id for r in symptom_recs + mood_recs])\
+             .order_by('?')[:1]
+
+        # ===== Combine all recommendations =====
+        all_recs = (
+            symptom_recs[:3] +          # Max 3 symptom matches
+            mood_recs[:2] +             # Max 2 mood matches
+            irregular_recs +            # Irregular cycle content
+            diverse_recs +              # Content variety
+            list(fresh_content)         # Less-seen content
+        )
+
+        # Final fallback if we don't have enough
+        if len(all_recs) < 6:
+            remaining = 6 - len(all_recs)
+            all_recs += list(recommendations.exclude(
+                id__in=[r.id for r in all_recs]
+            ).order_by('?')[:remaining])
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_recs = []
+        for rec in all_recs:
+            if rec.id not in seen:
+                seen.add(rec.id)
+                unique_recs.append(rec)
+
+        return unique_recs[:6]
+
+    except Exception as e:
+        # Fallback to general recommendations
+        return ContentRecommendation.objects.filter(
+            is_active=True
+        ).order_by('?')[:6]
+        
+def get_current_cycle(user, date=None):
+    """Get active cycle for a specific date (defaults to today)"""
+    date = date or timezone.now().date()
+    return Cycle.objects.filter(
+        user=user,
+        start_date__lte=date,
+        end_date__gte=date
+    ).first()
+
+def get_daily_data(user, date=None):
+    """Get consolidated daily data for recommendations"""
+    date = date or timezone.now().date()
+    daily_log = DailyLog.objects.filter(user=user, date=date).first()
     
-    variability = max(lengths) - min(lengths) if len(lengths) > 1 else 0
-    avg_length = sum(lengths) / len(lengths)
+    if not daily_log:
+        return {
+            'symptoms': [],
+            'moods': []
+        }
+    return {
+        'symptoms': list(daily_log.symptoms.values_list('symptom', flat=True)),
+        'moods': list(daily_log.moods.values_list('mood', flat=True)),
+        'experience': daily_log.experience
+    }
+
+
+def get_phase_prediction(user):
+    """Predict next menstrual phase and days remaining"""
+    # Get current phase data
+    phase_info = get_phase(user)
+    current_phase = phase_info['title'].split()[0].lower()  # "Follicular Phase" -> "follicular"
+    current_day = get_cycle_day(user)
     
-    recommendations = []
+    # Phase transition rules
+    phase_sequence = {
+        'menstrual': {'next': 'follicular', 'typical_duration': 7},
+        'follicular': {'next': 'ovulation', 'typical_duration': 7},
+        'ovulation': {'next': 'luteal', 'typical_duration': 7}, 
+        'luteal': {'next': 'menstrual', 'typical_duration': 7}
+    }
     
-    if variability > 15:
-        recommendations.append("Your cycles vary significantly in length")
-        recommendations.append("Consider tracking additional symptoms like temperature")
+    # Calculate prediction
+    phase_data = phase_sequence.get(current_phase, {})
+    if not phase_data:
+        return None
     
-    if avg_length > 35:
-        recommendations.append("Your average cycle is longer than typical")
-        recommendations.append("Consult a healthcare provider if this persists")
+    days_remaining = max(0, phase_data['typical_duration'] - (current_day % 7))
     
-    return recommendations
+    return {
+        'current_phase': current_phase,
+        'current_day': current_day,
+        'next_phase': phase_data['next'],
+        'days_remaining': days_remaining,
+        'estimated_date': (timezone.now() + timedelta(days=days_remaining)).date()
+    }

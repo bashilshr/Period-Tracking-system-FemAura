@@ -1,8 +1,11 @@
+from venv import logger
 from django.contrib.auth import login, logout, update_session_auth_hash
 from django.core.mail import send_mail
 from django.http import HttpResponse
 from django.contrib.auth import authenticate
 from django.conf import settings
+from django.db.models import F, Q, Prefetch
+
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status, serializers
@@ -23,7 +26,7 @@ import random
 from datetime import datetime
 from io import BytesIO
 
-from .models import CustomUser, OTP, Cycle, PasswordResetOTP, Symptom, Mood
+from .models import (ContentRecommendation, CustomUser, OTP, Cycle, PasswordResetOTP, Symptom, Mood,DailyLog,DailyMood,DailySymptom)
 
 from .auth_backends import EmailAuthBackend
 
@@ -35,7 +38,8 @@ from .serializers import (
     create_user,
     validate_otp_data,
     validate_login_data,
-    UserProfileSerializer, ChangePasswordSerializer
+    UserProfileSerializer, ChangePasswordSerializer,
+    DailyLogSerializer,
 )
 from .utils import (
     get_average_cycle_length,
@@ -43,6 +47,9 @@ from .utils import (
     get_ovulation_status,
     get_period_history,
     get_phase,
+    get_daily_data,
+    get_phase_prediction
+    
 )
 
 from datetime import datetime, timedelta
@@ -1048,3 +1055,566 @@ def check_user(request):
 @api_view(['GET'])
 def protected_data(request):
     return Response({'data': 'This is protected!'})
+
+########
+@swagger_auto_schema(
+    method='get',
+    operation_description="Get personalized content recommendations based on cycle phase, symptoms and moods",
+    responses={
+        200: openapi.Response(
+            description="Recommended content",
+            schema=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'phase': openapi.Schema(type=openapi.TYPE_STRING),
+                    'is_irregular': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                    'has_logged_today': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                    'recommendations': openapi.Schema(
+                        type=openapi.TYPE_ARRAY,
+                        items=openapi.Items(
+                            type=openapi.TYPE_OBJECT,
+                            properties={
+                                'title': openapi.Schema(type=openapi.TYPE_STRING),
+                                'type': openapi.Schema(type=openapi.TYPE_STRING),
+                                'matched_to': openapi.Schema(type=openapi.TYPE_STRING),
+                                'youtube_link': openapi.Schema(type=openapi.TYPE_STRING),
+                                'article_link': openapi.Schema(type=openapi.TYPE_STRING),
+                                'description': openapi.Schema(type=openapi.TYPE_STRING)
+                            }
+                        )
+                    )
+                }
+            )
+        )
+    }
+)
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def get_recommendations(request):
+    try:
+        user = request.user
+        today = timezone.now().date()
+        phase_info = get_phase(user)
+        
+        # Check if user has logged today
+        has_logged_today = DailyLog.objects.filter(
+            user=user,
+            date=today
+        ).exists()
+        
+        # Get today's symptoms and moods with one query
+        daily_log = DailyLog.objects.filter(
+            user=user,
+            date=today
+        ).prefetch_related(
+            Prefetch('symptoms', queryset=DailySymptom.objects.all()),
+            Prefetch('moods', queryset=DailyMood.objects.all())
+        ).first()
+        
+        todays_symptoms = [s.symptom for s in daily_log.symptoms.all()] if daily_log else []
+        todays_moods = [m.mood for m in daily_log.moods.all()] if daily_log else []
+
+        # Get base recommendations with efficient query
+        recommendations = ContentRecommendation.objects.filter(
+            Q(phase=phase_info['title'].split()[0].lower()) | 
+            Q(phase__isnull=True),
+            is_active=True
+        ).order_by('?')  # Randomize to get variety
+
+        # Categorize recommendations more efficiently
+        symptom_recs = [r for r in recommendations if r.symptom in todays_symptoms][:3]
+        mood_recs = [r for r in recommendations if r.mood in todays_moods][:2]
+        phase_recs = [r for r in recommendations if r.phase and r not in symptom_recs and r not in mood_recs][:3]
+        irregular_recs = [r for r in recommendations 
+                         if 'irregular' in r.description.lower() 
+                         and phase_info['is_irregular']][:1]
+        general_recs = [r for r in recommendations 
+                       if not r.phase and not r.symptom and not r.mood][:2]
+
+        # Combine and deduplicate recommendations
+        seen_ids = set()
+        final_recs = []
+        for rec in (symptom_recs + mood_recs + phase_recs + irregular_recs + general_recs):
+            if rec.id not in seen_ids:
+                seen_ids.add(rec.id)
+                final_recs.append(rec)
+                if len(final_recs) >= 6:
+                    break
+
+        # Prepare response
+        response_data = {
+            'phase': phase_info['title'],
+            'is_irregular': phase_info['is_irregular'],
+            'has_logged_today': has_logged_today,
+            'recommendations': [{
+                'title': rec.title,
+                'type': ('symptom' if rec.symptom else 
+                        'mood' if rec.mood else 
+                        'irregularity' if 'irregular' in rec.description.lower() and phase_info['is_irregular'] else 
+                        'phase'),
+                'matched_to': (rec.symptom or rec.mood or rec.phase or 'general'),
+                'youtube_link': rec.youtube_link,
+                'article_link': rec.article_link,
+                'description': rec.description
+            } for rec in final_recs]
+        }
+        
+        return Response(response_data, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        logger.error(f"Recommendation error for user {request.user.id}: {str(e)}", exc_info=True)
+        return Response(
+            {'error': 'Could not load recommendations', 'status': 'error'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+@swagger_auto_schema(
+    method='post',
+    operation_description="""
+    Log daily symptoms, moods, and experience.
+    Returns 409 if log already exists for date unless update_existing=true.
+    """,
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        properties={
+            'date': openapi.Schema(type=openapi.TYPE_STRING, format='date'),
+            'experience': openapi.Schema(type=openapi.TYPE_STRING),
+            'moods': openapi.Schema(
+                type=openapi.TYPE_ARRAY,
+                items=openapi.Items(type=openapi.TYPE_STRING)
+            ),
+            'symptoms': openapi.Schema(
+                type=openapi.TYPE_ARRAY,
+                items=openapi.Items(type=openapi.TYPE_STRING)
+            ),
+            'update_existing': openapi.Schema(
+                type=openapi.TYPE_BOOLEAN,
+                default=False,
+                description="Set to true to update existing log"
+            )
+        },
+        required=['date']
+    ),
+    responses={
+        201: openapi.Response("Log created successfully"),
+        400: openapi.Response("Invalid input data"),
+        409: openapi.Response("Log already exists for this date")
+    }
+)
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def log_daily_experience(request):
+    try:
+        user = request.user
+        log_date_str = request.data.get('date')
+        log_date = datetime.strptime(log_date_str, '%Y-%m-%d').date() if log_date_str else timezone.now().date()
+        
+        # Check for duplicates in request data
+        symptoms = request.data.get('symptoms', [])
+        if len(symptoms) != len(set(symptoms)):
+            return Response(
+                {'error': 'Duplicate symptoms in request', 'status': 'error'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        moods = request.data.get('moods', [])
+        if len(moods) != len(set(moods)):
+            return Response(
+                {'error': 'Duplicate moods in request', 'status': 'error'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Check for existing log
+        existing_log = DailyLog.objects.filter(user=user, date=log_date).first()
+        if existing_log and not request.data.get('update_existing', False):
+            return Response(
+                {
+                    'error': f'Log already exists for {log_date}',
+                    'log_id': existing_log.id,
+                    'suggestion': 'Use update_existing=true to update',
+                    'status': 'error'
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+
+        # Find or create cycle
+        cycle = Cycle.objects.filter(
+            user=user,
+            start_date__lte=log_date,
+            end_date__gte=log_date
+        ).first()
+        
+        if not cycle:
+            cycle = Cycle.objects.create(
+                user=user,
+                start_date=log_date,
+                end_date=log_date
+            )
+
+        # Create or update log
+        if existing_log and request.data.get('update_existing', False):
+            daily_log = existing_log
+            daily_log.experience = request.data.get('experience', daily_log.experience)
+            daily_log.save()
+            daily_log.symptoms.all().delete()
+            daily_log.moods.all().delete()
+        else:
+            daily_log = DailyLog.objects.create(
+                user=user,
+                date=log_date,
+                experience=request.data.get('experience', ''),
+                cycle=cycle
+            )
+
+        # Bulk create symptoms and moods
+        DailySymptom.objects.bulk_create([
+            DailySymptom(daily_log=daily_log, symptom=s) for s in symptoms
+        ])
+        
+        DailyMood.objects.bulk_create([
+            DailyMood(daily_log=daily_log, mood=m) for m in moods
+        ])
+
+        return Response({
+            'status': 'success',
+            'log_id': daily_log.id,
+            'cycle_id': cycle.id,
+            'date': log_date.isoformat(),
+            'action': 'updated' if existing_log else 'created'
+        }, status=status.HTTP_201_CREATED)
+
+    except ValueError as e:
+        return Response(
+            {'error': 'Invalid date format. Use YYYY-MM-DD', 'status': 'error'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    except Exception as e:
+        logger.error(f"Error logging daily experience for user {user.id}: {str(e)}")
+        return Response(
+            {'error': 'Failed to save daily log', 'details': str(e), 'status': 'error'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+    
+    
+@swagger_auto_schema(
+    method='post',
+    operation_description="Merge single-day cycles into a combined cycle",
+    request_body=openapi.Schema(
+        type=openapi.TYPE_OBJECT,
+        properties={
+            'start_date': openapi.Schema(type=openapi.TYPE_STRING, format='date'),
+            'end_date': openapi.Schema(type=openapi.TYPE_STRING, format='date')
+        },
+        required=['start_date', 'end_date']
+    ),
+    responses={
+        200: openapi.Response("Cycles merged successfully"),
+        400: openapi.Response("Invalid date range or no single-day cycles found")
+    }
+)
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def merge_days_to_cycle(request):
+    try:
+        user = request.user
+        start_date = datetime.strptime(request.data['start_date'], '%Y-%m-%d').date()
+        end_date = datetime.strptime(request.data['end_date'], '%Y-%m-%d').date()
+        
+        if end_date <= start_date:
+            return Response(
+                {'error': 'End date must be after start date', 'status': 'error'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Find single-day cycles in range
+        cycles = Cycle.objects.filter(
+            user=user,
+            start_date=F('end_date'),
+            start_date__gte=start_date,
+            end_date__lte=end_date
+        ).order_by('start_date')
+
+        if not cycles.exists():
+            return Response(
+                {'error': 'No single-day cycles found in date range', 'status': 'error'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Create new combined cycle
+        new_cycle = Cycle.objects.create(
+            user=user,
+            start_date=start_date,
+            end_date=end_date
+        )
+
+        # Update all related daily logs in bulk
+        DailyLog.objects.filter(cycle__in=cycles).update(cycle=new_cycle)
+
+        # Delete old cycles
+        cycles.delete()
+
+        return Response({
+            'status': 'success',
+            'new_cycle_id': new_cycle.id,
+            'merged_cycles': len(cycles),
+            'date_range': f"{start_date} to {end_date}"
+        }, status=status.HTTP_200_OK)
+
+    except ValueError as e:
+        return Response(
+            {'error': 'Invalid date format. Use YYYY-MM-DD', 'status': 'error'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    except Exception as e:
+        logger.error(f"Error merging cycles for user {user.id}: {str(e)}")
+        return Response(
+            {'error': 'Failed to merge cycles', 'details': str(e), 'status': 'error'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+@swagger_auto_schema(
+    method='get',
+    operation_description="Get current phase and next phase prediction",
+    responses={
+        200: openapi.Response(
+            description="Phase prediction data",
+            schema=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'current_phase': openapi.Schema(type=openapi.TYPE_STRING),
+                    'current_day': openapi.Schema(type=openapi.TYPE_INTEGER),
+                    'next_phase': openapi.Schema(type=openapi.TYPE_STRING),
+                    'days_until_next_phase': openapi.Schema(type=openapi.TYPE_INTEGER),
+                    'common_symptoms': openapi.Schema(
+                        type=openapi.TYPE_ARRAY,
+                        items=openapi.Items(type=openapi.TYPE_STRING)
+                    ),
+                    'common_moods': openapi.Schema(
+                        type=openapi.TYPE_ARRAY,
+                        items=openapi.Items(type=openapi.TYPE_STRING)
+                    ),
+                    'cycle_length': openapi.Schema(type=openapi.TYPE_INTEGER),
+                    'daily_status': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                    'is_irregular': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                    'logged_today': openapi.Schema(type=openapi.TYPE_BOOLEAN),
+                }
+            )
+        )
+    }
+)
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def phase_prediction(request):
+    """Get current menstrual phase and next phase prediction"""
+    try:
+        user = request.user
+        today = timezone.now().date()
+        
+        # Get current cycle with prefetching
+        current_cycle = Cycle.objects.filter(
+            user=user,
+            start_date__lte=today,
+            end_date__gte=today
+        ).select_related('user').first()
+        
+        logged_today = DailyLog.objects.filter(
+            user=user,
+            date=today
+        ).exists()
+        
+        if not current_cycle:
+            return Response({
+                'message': 'No active cycle found',
+                'suggestion': 'Please log your period start date'
+            }, status=status.HTTP_200_OK)
+        
+        # Calculate current day of cycle
+        current_day = (today - current_cycle.start_date).days + 1
+        cycle_length = current_cycle.cycle_length or get_average_cycle_length(user) or 28
+        
+        # Determine if cycle is irregular
+        avg_length = get_average_cycle_length(user)
+        is_irregular = (avg_length and abs(cycle_length - avg_length) > 5) or cycle_length > 35
+        
+        # Phase calculation with adaptive logic
+        phases = []
+        
+        if is_irregular:
+            # Adaptive phases for irregular cycles
+            menstrual_end = max(3, int(cycle_length * 0.15))  # At least 3 days
+            follicular_end = menstrual_end + max(5, int(cycle_length * 0.25))
+            ovulation_end = follicular_end + 3  # Fixed 3-day ovulation window
+            phases = [
+                {'name': 'menstrual', 'start': 1, 'end': menstrual_end},
+                {'name': 'follicular', 'start': menstrual_end+1, 'end': follicular_end},
+                {'name': 'ovulation', 'start': follicular_end+1, 'end': ovulation_end},
+                {'name': 'luteal', 'start': ovulation_end+1, 'end': cycle_length}
+            ]
+        else:
+            # Standard phases for regular cycles
+            phases = [
+                {'name': 'menstrual', 'start': 1, 'end': 5},
+                {'name': 'follicular', 'start': 6, 'end': 13},
+                {'name': 'ovulation', 'start': 14, 'end': 16},
+                {'name': 'luteal', 'start': 17, 'end': cycle_length}
+            ]
+        
+        # Find current and next phase
+        current_phase = next_phase = None
+        days_until_next = 0
+        
+        for i, phase in enumerate(phases):
+            if phase['start'] <= current_day <= phase['end']:
+                current_phase = phase['name']
+                next_phase = phases[(i + 1) % len(phases)]['name']
+                days_until_next = phase['end'] - current_day + 1
+                break
+        
+        # Handle case where current day exceeds cycle length
+        if current_day > cycle_length:
+            current_phase = 'awaiting menstruation'
+            next_phase = 'menstrual'
+            days_until_next = None  # Can't predict
+            
+        # Get today's symptoms and moods
+        daily_log = DailyLog.objects.filter(
+            user=user,
+            date=today
+        ).prefetch_related('symptoms', 'moods').first()
+        
+        response_data = {
+            'current_phase': current_phase,
+            'current_day': current_day,
+            'next_phase': next_phase,
+            'days_until_next_phase': days_until_next,
+            'common_symptoms': [s.symptom for s in daily_log.symptoms.all()] if daily_log else [],
+            'common_moods': [m.mood for m in daily_log.moods.all()] if daily_log else [],
+            'cycle_length': cycle_length,
+            'is_irregular': is_irregular,
+            'logged_today': logged_today,
+        }
+        
+        return Response(response_data)
+    
+    except Exception as e:
+        logger.error(f"Phase prediction error: {str(e)}")
+        return Response({
+            'error': 'Could not calculate phase prediction',
+            'details': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+@swagger_auto_schema(
+    method='post',
+    operation_description="""
+    Log daily symptoms, moods, and experience.
+    All fields are optional. Can provide:
+    - symptoms: Array of symptom strings (e.g. ["CRAMPS", "FATIGUE"])
+    - moods: Array of mood strings (e.g. ["HAPPY", "CALM"])
+    - experience: Free text description
+    - date: Optional date (defaults to today)
+    """,
+    request_body=DailyLogSerializer,
+    responses={
+        201: DailyLogSerializer,
+        400: "Invalid data"
+    }
+)
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def log_daily_status(request):
+    """
+    Create or update daily log with symptoms and moods.
+    Replaces all existing symptoms/moods for the date if they exist.
+    """
+    serializer = DailyLogSerializer(
+        data=request.data,
+        context={'request': request}
+    )
+    
+    if serializer.is_valid():
+        serializer.save(user=request.user)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@swagger_auto_schema(
+    method='get',
+    operation_description="Get today's log entry with symptoms and moods",
+    responses={
+        200: openapi.Response(
+            description="Today's log data",
+            schema=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'date': openapi.Schema(type=openapi.TYPE_STRING, format='date'),
+                    'experience': openapi.Schema(type=openapi.TYPE_STRING),
+                    'symptoms': openapi.Schema(
+                        type=openapi.TYPE_ARRAY,
+                        items=openapi.Items(type=openapi.TYPE_STRING)
+                    ),
+                    'moods': openapi.Schema(
+                        type=openapi.TYPE_ARRAY,
+                        items=openapi.Items(type=openapi.TYPE_STRING)
+                    ),
+                    'cycle_day': openapi.Schema(type=openapi.TYPE_INTEGER, nullable=True)
+                }
+            )
+        ),
+        404: openapi.Response(
+            description="No log found for today",
+            schema=openapi.Schema(
+                type=openapi.TYPE_OBJECT,
+                properties={
+                    'date': openapi.Schema(type=openapi.TYPE_STRING, format='date'),
+                    'message': openapi.Schema(type=openapi.TYPE_STRING)
+                }
+            )
+        )
+    }
+)
+@api_view(['GET'])
+@authentication_classes([JWTAuthentication])
+@permission_classes([IsAuthenticated])
+def get_todays_status(request):
+    """
+    Get today's log entry with symptoms and moods
+    """
+    today = timezone.now().date()
+    
+    try:
+        daily_log = DailyLog.objects.filter(
+            user=request.user,
+            date=today
+        ).prefetch_related('symptoms', 'moods').first()
+        
+        if not daily_log:
+            return Response({
+                'date': today.isoformat(),
+                'message': 'No log entry for today'
+            }, status=status.HTTP_200_OK)
+        
+        # Calculate cycle day if log has a cycle
+        cycle_day = None
+        if daily_log.cycle:
+            cycle_day = (today - daily_log.cycle.start_date).days + 1
+        
+        response_data = {
+            'date': daily_log.date.isoformat(),
+            'experience': daily_log.experience,
+            'symptoms': [s.symptom for s in daily_log.symptoms.all()],
+            'moods': [m.mood for m in daily_log.moods.all()],
+            'cycle_day': cycle_day
+        }
+        
+        return Response(response_data)
+    
+    except Exception as e:
+        return Response({
+            'error': str(e),
+            'status': 'error'
+        }, status=status.HTTP_400_BAD_REQUEST)

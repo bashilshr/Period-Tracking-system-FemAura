@@ -80,3 +80,83 @@ class PasswordResetOTP(models.Model):
     
     def is_expired(self):
         return timezone.now() - self.created_at > timedelta(minutes=15)
+
+class ContentRecommendation(models.Model):
+    
+    PHASE_CHOICES = [
+        ('menstrual', 'Menstrual Phase'),
+        ('follicular', 'Follicular Phase'),
+        ('ovulation', 'Ovulation Phase'),
+        ('luteal', 'Luteal Phase'),
+    ]
+    
+    mood = models.CharField(max_length=100, blank=True, null=True) 
+    phase = models.CharField(max_length=20, choices=PHASE_CHOICES)
+    symptom = models.CharField(max_length=100, blank=True, null=True)
+    title = models.CharField(max_length=200)
+    youtube_link = models.URLField()
+    article_link = models.URLField(blank=True, null=True)
+    description = models.TextField()
+    is_active = models.BooleanField(default=True)
+
+    def __str__(self):
+        return f"{self.get_phase_display()} - {self.title}"
+    
+class DailyLog(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    date = models.DateField(default=timezone.now)
+    experience = models.TextField(blank=True)
+    cycle = models.ForeignKey('Cycle', null=True, blank=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        unique_together = ['user', 'date']
+        ordering = ['-date']
+
+    def __str__(self):
+        return f"{self.user.email} - {self.date}"
+
+class DailySymptom(models.Model):
+    SYMPTOM_CHOICES = [
+        ('NONE', 'Everything is good'),
+        ('CRAMPS', 'Cramps'),
+        ('FATIGUE', 'Fatigue'),
+        ('HEADACHE', 'Headache'),
+        ('INSOMNIA', 'Insomnia'),
+        ('ACNE', 'Acne'),
+        ('ABDOMINAL_PAIN', 'Abdominal Pain'),
+        ('BREAST_TENDERNESS', 'Breast tenderness'),
+        ('BACKPAIN', 'Backpain'),
+        ('CRAVINGS', 'Cravings'),
+    ]
+    
+    daily_log = models.ForeignKey(DailyLog, related_name='symptoms', on_delete=models.CASCADE)
+    symptom = models.CharField(max_length=20, choices=SYMPTOM_CHOICES)
+
+    class Meta:
+        unique_together = ['daily_log', 'symptom']
+
+    def __str__(self):
+        return f"{self.daily_log.date}: {self.get_symptom_display()}"
+
+class DailyMood(models.Model):
+    MOOD_CHOICES = [
+        ('CALM', 'Calm'),
+        ('HAPPY', 'Happy'),
+        ('LOW_ENERGY', 'Low energy'),
+        ('IRRITATED', 'Irritated'),
+        ('ANXIOUS', 'Anxious'),
+        ('CRAVINGS', 'Cravings'),
+        ('MOOD_SWINGS', 'Mood swings'),
+        ('SAD', 'Sad'),
+        ('ANGRY', 'Angry'),
+        ('RELAXED', 'Relaxed'),
+    ]
+    
+    daily_log = models.ForeignKey(DailyLog, related_name='moods', on_delete=models.CASCADE)
+    mood = models.CharField(max_length=20, choices=MOOD_CHOICES)
+
+    class Meta:
+        unique_together = ['daily_log', 'mood']
+
+    def __str__(self):
+        return f"{self.daily_log.date}: {self.get_mood_display()}"
