@@ -184,3 +184,4 @@ SWAGGER_SETTINGS = {
     },
     'USE_SESSION_AUTH': False,  #Disabled thje auth cause not needed for now
 }
+

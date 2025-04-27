@@ -237,14 +237,14 @@ def get_phase(user,date = None):
 
 def get_period_history(user):
     """
-    Returns comprehensive period history with analysis and recommendations.
-    Now excludes single-day cycles from calculations.
+    Returns comprehensive period history with analysis and personalized recommendations.
+    Excludes single-day cycles from calculations.
     
     Args:
-        user: User model instance (not request object)
+        user: User model instance
     
     Returns:
-        dict: Contains cycle history and analysis
+        dict: Contains cycle history, analysis, and recommendations
         None: If no cycles exist
     """
     try:
@@ -253,8 +253,8 @@ def get_period_history(user):
             
         # Get multi-day cycles only
         cycles = Cycle.objects.filter(
-            user_id=user.id,  # Explicitly use user.id
-            start_date__lt=F('end_date')  # Only multi-day cycles
+            user_id=user.id,
+            start_date__lt=F('end_date')
         ).order_by('start_date')
 
         if not cycles.exists():
@@ -272,12 +272,12 @@ def get_period_history(user):
         
         is_irregular = avg_length > 35 or variability > 7
         
-        # Get health insights from daily logs
+        # Get health insights
         common_symptoms = (
             DailySymptom.objects.filter(daily_log__user=user)
             .values('symptom')
             .annotate(count=Count('id'))
-            .order_by('-count')[:3]
+            .order_by('-count')[:5]  # Increased to top 5 symptoms
         )
         
         common_moods = (
@@ -287,20 +287,71 @@ def get_period_history(user):
             .order_by('-count')[:3]
         )
 
-        # Prepare response data
+        # ===== Enhanced Recommendations Engine =====
+        recommendations = []
+        
+        # 1. Cycle Pattern Recommendations
+        if avg_length < 24:
+            recommendations.append("Short cycles detected - consider iron-rich foods to compensate for frequent blood loss")
+        elif avg_length > 35:
+            recommendations.append("Long cycles detected - track basal body temperature to confirm ovulation")
+        
+        if variability > 7:
+            rec = f"Your cycle varies by {variability} days. "
+            rec += "Consult a healthcare provider" if variability > 14 else "Stress management may help regulate cycles"
+            recommendations.append(rec)
+
+        # 2. Symptom-Based Recommendations
+        symptom_advice = {
+            'cramps': ["Try magnesium supplements", "Use heating pads for relief"],
+            'bloating': ["Reduce salt intake before period", "Increase water consumption"],
+            'headache': ["Monitor caffeine intake", "Ensure proper hydration"],
+            'fatigue': ["Increase iron-rich foods", "Consider vitamin B complex"]
+        }
+        
+        for symptom in common_symptoms:
+            symptom_name = symptom['symptom'].lower()
+            if symptom_name in symptom_advice:
+                recommendations.extend(symptom_advice[symptom_name])
+
+        # 3. Mood-Based Recommendations
+        mood_advice = {
+            'irritable': ["Practice mindfulness meditation", "Reduce caffeine intake"],
+            'anxious': ["Try breathing exercises", "Consider magnesium supplements"],
+            'depressed': ["Increase omega-3 intake", "Ensure adequate sunlight exposure"]
+        }
+        
+        for mood in common_moods:
+            mood_name = mood['mood'].lower()
+            if mood_name in mood_advice:
+                recommendations.extend(mood_advice[mood_name])
+
+        # 4. General Health Recommendations
+        general_advice = [
+            "Track symptoms daily for better pattern recognition",
+            "Aim for 7-9 hours of sleep for hormonal balance",
+            "Consider cycle syncing your exercise routine"
+        ]
+        
+        if is_irregular:
+            general_advice.append("Maintain a consistent sleep schedule to help regulate cycles")
+
+        recommendations.extend(general_advice)
+
+        # Prepare history data
         history_data = []
         for cycle in cycles:
             try:
                 cycle_length = (cycle.end_date - cycle.start_date).days + 1
+                symptoms = DailySymptom.objects.filter(
+                    daily_log__cycle=cycle
+                ).values_list('symptom', flat=True).distinct()
+                
                 history_data.append({
                     'start_date': cycle.start_date,
                     'end_date': cycle.end_date,
                     'days': cycle_length,
-                    'symptoms': list(
-                        DailySymptom.objects.filter(
-                            daily_log__cycle=cycle
-                        ).values_list('symptom', flat=True).distinct()
-                    ),
+                    'symptoms': list(symptoms),
                     'is_irregular': cycle_length > 35
                 })
             except Exception as e:
@@ -315,12 +366,17 @@ def get_period_history(user):
             'common_symptoms': [s['symptom'] for s in common_symptoms],
             'common_moods': [m['mood'] for m in common_moods],
             'period_history': history_data,
+            'recommendations': {
+                'cycle_based': recommendations[:3],  # Top 3 cycle-based
+                'symptom_based': [r for r in recommendations if r in [item for sublist in symptom_advice.values() for item in sublist]][:2],
+                'general': general_advice[:2],
+                'priority': list(dict.fromkeys(recommendations))[:5]  # Deduplicated top 5
+            }
         }
 
     except Exception as e:
         logger.error(f"Error in get_period_history: {str(e)}")
-        raise  # Re-raise to handle in view
-
+        raise
 
 def get_irregularity_level(variability, avg_length):
     """Classify cycle irregularity"""
