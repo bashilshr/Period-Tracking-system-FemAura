@@ -366,12 +366,8 @@ def get_period_history(user):
             'common_symptoms': [s['symptom'] for s in common_symptoms],
             'common_moods': [m['mood'] for m in common_moods],
             'period_history': history_data,
-            'recommendations': {
-                'cycle_based': recommendations[:3],  # Top 3 cycle-based
-                'symptom_based': [r for r in recommendations if r in [item for sublist in symptom_advice.values() for item in sublist]][:2],
-                'general': general_advice[:2],
-                'priority': list(dict.fromkeys(recommendations))[:5]  # Deduplicated top 5
-            }
+            'recommendations': general_advice[:2], 
+            
         }
 
     except Exception as e:

@@ -43,14 +43,12 @@ from .serializers import (
     validate_registration_data,
     create_user,
     validate_otp_data,
-    validate_login_data,
     UserProfileSerializer, ChangePasswordSerializer,
     DailyLogSerializer,
 )
 from .utils import (
     get_average_cycle_length,
     get_current_day,
-    get_ovulation_status,
     get_period_history,
     get_phase,
     get_daily_data,

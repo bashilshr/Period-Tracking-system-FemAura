@@ -1,18 +1,36 @@
+from wsgiref.validate import validator
 from rest_framework import serializers
 from django.contrib.auth import authenticate
 from .models import CustomUser, OTP, DailyLog, DailySymptom, DailyMood, Cycle
 from django.utils import timezone
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.core import validators
+from django.core.validators import validate_email, RegexValidator
+
 # Function to validate registration data
 def validate_registration_data(data):
+    errors = {}
+    
+    if 'password' not in data:
+        errors['password'] = ['This field is required.']
+    if 'confirmpassword' not in data:
+        errors['confirmpassword'] = ['This field is required.']
+    
+    if errors:
+        raise serializers.ValidationError(errors)
+    
     if data['password'] != data['confirmpassword']:
-        raise serializers.ValidationError("Password and Confirm Password do not match.")
+        raise serializers.ValidationError({
+            'confirmpassword': ['Password and Confirm Password do not match.']
+        })
     
     try:
         validate_password(data['password'])
     except ValidationError as e:
-        raise serializers.ValidationError(e.messages)
+        raise serializers.ValidationError({
+            'password': e.messages
+        })
     
     return data
 # Function to create a user
@@ -29,22 +47,6 @@ def create_user(data):
     user = CustomUser.objects.create_user(**validated_data)
     return user
 
-# Function to validate login data
-def validate_login_data(data):
-    email = data.get('email')
-    password = data.get('password')
-
-    if email and password:
-        user = authenticate(email=email, password=password)
-        if user:
-            if not user.is_active:
-                raise serializers.ValidationError("User account is not active.")
-            data['user'] = user
-        else:
-            raise serializers.ValidationError("Unable to log in with provided credentials.")
-    else:
-        raise serializers.ValidationError("Must include 'email' and 'password'.")
-    return data
 
 # Function to validate OTP data
 def validate_otp_data(data):
@@ -64,6 +66,7 @@ def validate_otp_data(data):
 
     data['otp_record'] = otp_record
     return data
+# serializers.py
 class ExportDataSerializer(serializers.Serializer):
     start_date = serializers.DateField(required=False)
     end_date = serializers.DateField(required=False)
@@ -71,6 +74,20 @@ class ExportDataSerializer(serializers.Serializer):
         choices=['csv', 'json', 'pdf'], 
         default='csv'
     )
+
+    def validate(self, data):
+        if data.get('end_date') and not data.get('start_date'):
+            raise serializers.ValidationError({
+            'start_date': 'start_date must be provided when using end_date'
+        })
+        # Validate date range if both are provided
+        if data.get('start_date') and data.get('end_date'):
+            if data['start_date'] > data['end_date']:
+                raise serializers.ValidationError({
+                    'end_date': 'Must be after start_date'
+                })
+        
+        return data
     
 class RequestPasswordResetSerializer(serializers.Serializer):
     email = serializers.EmailField()
@@ -92,20 +109,69 @@ class NewPasswordSerializer(serializers.Serializer):
         return data
 #crud operation for user account
 class UserProfileSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(required=False)
+    username = serializers.CharField(
+        max_length=150,
+        validators=[
+            RegexValidator(
+                r'^[\w.@+-]+$',
+                message='Enter a valid username.'
+            ),
+            validators.MaxLengthValidator(150)  # Explicit length validator
+        ]
+    )
+
     class Meta:
         model = CustomUser
-        fields = ['id', 'username', 'email', ]
-        read_only_fields = ['email'] 
+        fields = ['id', 'username', 'email']
+        extra_kwargs = {
+            'username': {
+                'required': True,
+                'max_length': 150  # Meta-level validation
+            }
+        }
+    def validate_email(self, value):
+        if value:
+            try:
+                validate_email(value)
+            except validators.ValidationError:
+                raise serializers.ValidationError("Enter a valid email address")
+        return value
 
+    def validate_username(self, value):
+        """Custom username validation with explicit length check"""
+        if len(value) > 16:
+            raise serializers.ValidationError(
+                "Ensure this field has no more than 16 characters"
+            )
+        return value
+    
 class ChangePasswordSerializer(serializers.Serializer):
     old_password = serializers.CharField(required=True)
     new_password = serializers.CharField(required=True)
     confirm_password = serializers.CharField(required=True)
 
     def validate(self, data):
+        # Check password match
         if data['new_password'] != data['confirm_password']:
-            raise serializers.ValidationError("New passwords don't match")
-        validate_password(data['new_password'])
+            raise serializers.ValidationError({
+                'non_field_errors': ["Passwords don't match"]
+            })
+
+        # Check new password is different
+        if data['new_password'] == data['old_password']:
+            raise serializers.ValidationError({
+                'non_field_errors': ["New password must be different"]
+            })
+
+        # Validate password strength
+        try:
+            validate_password(data['new_password'])
+        except ValidationError as e:
+            raise serializers.ValidationError({
+                'new_password': list(e.messages)
+            })
+
         return data
 
 class DailySymptomSerializer(serializers.ModelSerializer):
@@ -117,7 +183,8 @@ class DailySymptomSerializer(serializers.ModelSerializer):
         }
 
     def validate_symptom(self, value):
-        if value not in dict(DailySymptom.SYMPTOM_CHOICES):
+        valid_choices = [choice[0] for choice in DailySymptom.SYMPTOM_CHOICES]
+        if value not in valid_choices:
             raise serializers.ValidationError("Invalid symptom selection")
         return value
 
@@ -135,9 +202,13 @@ class DailyMoodSerializer(serializers.ModelSerializer):
         return value
 
 class DailyLogSerializer(serializers.ModelSerializer):
-    symptoms = DailySymptomSerializer(many=True, required=False)
-    moods = DailyMoodSerializer(many=True, required=False)
-
+    experience = serializers.CharField(
+        max_length=500,
+        validators=[
+            validators.ProhibitNullCharactersValidator(),
+            validators.validate_slug  # Basic XSS protection
+        ]
+    )
     class Meta:
         model = DailyLog
         fields = ['id', 'date', 'experience', 'symptoms', 'moods']
@@ -145,6 +216,13 @@ class DailyLogSerializer(serializers.ModelSerializer):
             'date': {'required': False},
             'experience': {'required': False}
         }
+
+    def validate_experience(self, value):
+        if len(value) > 500:
+            raise serializers.ValidationError("Experience cannot exceed 500 characters")
+        if '<script>' in value.lower():
+            raise serializers.ValidationError("Invalid input detected")
+        return value
 
     def create(self, validated_data):
         symptoms_data = validated_data.pop('symptoms', [])
